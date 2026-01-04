@@ -1,0 +1,106 @@
+.car-listings-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100%;
+  background-color: #ffffff;
+  padding: 2rem;
+  overflow-y: auto;
+}
+
+.car-listings-loading,
+.no-listings {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #666;
+  font-size: 1rem;
+}
+
+.car-listings-header {
+  margin-bottom: 2rem;
+}
+
+.car-listings-header h1 {
+  font-size: 2rem;
+  font-weight: 600;
+  color: #1a1a1a;
+  margin: 0 0 0.5rem 0;
+}
+
+.listings-count {
+  color: #666;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.scatterplot-container {
+  width: 100%;
+  height: 600px;
+  background-color: #fafafa;
+  border-radius: 8px;
+  padding: 1.5rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.custom-tooltip {
+  background-color: #ffffff;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  padding: 1rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  min-width: 250px;
+}
+
+.custom-tooltip h4 {
+  margin: 0 0 0.75rem 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1a1a1a;
+  border-bottom: 1px solid #e5e5e5;
+  padding-bottom: 0.5rem;
+}
+
+.tooltip-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.tooltip-content p {
+  margin: 0;
+  font-size: 0.875rem;
+  color: #333;
+  line-height: 1.4;
+}
+
+.tooltip-content strong {
+  color: #1a1a1a;
+  font-weight: 600;
+  margin-right: 0.5rem;
+}
+
+.no-listings {
+  text-align: center;
+  color: #999;
+  font-size: 1rem;
+  padding: 3rem;
+}
+
+@media (max-width: 768px) {
+  .car-listings-container {
+    padding: 1rem;
+  }
+
+  .scatterplot-container {
+    height: 400px;
+    padding: 1rem;
+  }
+
+  .custom-tooltip {
+    min-width: 200px;
+    font-size: 0.8rem;
+  }
+}
+

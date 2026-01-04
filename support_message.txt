@@ -1,0 +1,33 @@
+Subject: API Still Showing Unverified Status Despite Approval Email Received 6 Hours Ago
+
+Hello Mobile Text Alerts Support,
+
+I received an approval email approximately 6 hours ago confirming that my phone number verification was approved. However, I'm still unable to send custom messages via the API - all requests are being rejected with the following error:
+
+Error: "Unverified accounts only can send template messages. Check the controlled-templates/global API endpoint for approved templates."
+Error Type: no_url_allowed_error
+HTTP Code: 403
+
+Here are my account details:
+- API Key: bed44f38-3873-5b65-8990-2743d5fa91e0
+- Account Name: MyStartup
+- Email: drew.deister@gmail.com
+- Phone Number: +1 877 664 7380
+- Longcode ID: 8337441549
+
+When I check the dedicated numbers endpoint (/v3/dedicated-numbers), I see:
+- "verified": 1 (general verification shows as complete)
+- "tollFreeVerificationStatus": 0 (toll-free verification still shows as pending)
+
+I'm trying to implement an auto-reply feature that sends "hi there!" when someone texts my number. The webhook is working correctly (I can receive messages), but I cannot send replies because the API still treats my account as unverified.
+
+Could you please:
+1. Check the verification status on your end
+2. Confirm if the toll-free verification process is complete
+3. Refresh/sync my verification status in the API system if needed
+
+Thank you for your assistance!
+
+Best regards,
+[Your Name]
+
