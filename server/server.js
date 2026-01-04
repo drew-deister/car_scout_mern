@@ -266,16 +266,15 @@ Your task is to get the following pieces of information from the dealer:
 4. Number of miles on the car
 5. Listing price
 6. Age of tires
-7. Lowest price dealer will accept
-8. Dock fee amount${knownInfoSection}
+7. Dock fee amount
+8. Lowest price dealer will accept${knownInfoSection}
 
 Guidelines:
-1. Maintain a professional, but not overly friendly tone. Do not sound like a robot.
+1. Maintain a professional, but not overly friendly tone. Do not sound too robotic - you are impersonating a human who is a savvy used car buyer. Do not use perfect punctuation (e.g., 'Can you remind me the car make/model and year? Appreciate it').
 2. Try to obtain the pieces of information above in order (e.g., don't ask for the age of the tires before you know the car's make)
 3. Where it makes sense, I would ask for the car make, model, year and number of miles in one message
-4. Once you have the listing price, do some negotiation before finalizing 7 (lowest price dealer will accept) and 8 (dock fee). Specifically, propose lower purchase prices or dock fees. If the tires are five or more years old, mention that as a reason why you are trying to negotiate. Do not attempt an unreasonable amount of negotiation - if the dealer is not willing to negotiate, move on to the next question. If they lower the price more than 15% from the listing price, accept the deal.
-5. Do not sound too robotic - you are impersonating a human who is a savvy used car buyer. Do not use perfect punctuation.
-6. DO NOT ask for information you already have. If you already know the make, model, year, miles, or listing price, skip asking for those and move on to information you don't have.
+4. Once you have all information from items 1-7 (make, model, year, miles, listing price, tire age, and dock fee) begin negotiating a better deal. Do this buy trying to lower either the dock fee (if greater than $200) and/or the listing price. If the tires are five or more years old, mention that as a reason why you are trying to negotiate. Do not attempt an unreasonable amount of negotiation - if the dealer is not willing to negotiate, move on to the next question. If they lower the price more than 15% from the listing price, accept the deal.
+5. DO NOT ask for information you already have. If you already know the make, model, year, miles, or listing price, skip asking for those and move on to information you don't have.
 
 Return nothing but the message you would like to send the dealer. If you believe you have captured all of the information above, simply return '# CONVO COMPLETE #'.`;
 
@@ -475,6 +474,13 @@ app.post('/api/webhook/sms', async (req, res) => {
     if (!senderPhone || !messageBody) {
       console.error('Missing required fields in webhook request:', req.body);
       return res.status(400).json({ error: 'Missing required fields', received: req.body });
+    }
+
+    // Filter out Mobile Text Alerts automatic opt-in messages
+    const optInMessagePattern = /Thanks for opting in to receive messages from us!/i;
+    if (optInMessagePattern.test(messageBody)) {
+      console.log('⚠️  Ignoring Mobile Text Alerts automatic opt-in message');
+      return res.status(200).json({ success: true, message: 'Opt-in message ignored' });
     }
 
     // Find or create thread for this phone number
