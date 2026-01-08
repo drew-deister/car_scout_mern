@@ -1,0 +1,524 @@
+import re
+import os
+import json
+import asyncio
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+from openai import OpenAI
+import requests
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# OpenAI configuration
+openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY')) if os.getenv('OPENAI_API_KEY') else None
+
+# Mobile Text Alerts configuration
+MTA_API_BASE_URL = 'https://api.mobile-text-alerts.com/v3'
+MTA_API_KEY = os.getenv('MTA_API_KEY')
+MTA_PHONE_NUMBER = '+18776647380'
+MTA_LONGCODE_ID = 8337441549
+MTA_AUTO_REPLY_TEMPLATE_ID = os.getenv('MTA_AUTO_REPLY_TEMPLATE_ID')
+if MTA_AUTO_REPLY_TEMPLATE_ID:
+    try:
+        MTA_AUTO_REPLY_TEMPLATE_ID = int(MTA_AUTO_REPLY_TEMPLATE_ID)
+    except:
+        MTA_AUTO_REPLY_TEMPLATE_ID = None
+
+
+def extract_urls(text: str) -> List[str]:
+    """Extract URLs from text"""
+    url_regex = r'(https?://[^\s]+)'
+    urls = re.findall(url_regex, text)
+    return urls
+
+
+async def scrape_and_extract_car_data(url: str) -> Dict[str, Any]:
+    """Scrape web page and extract car information using GPT-4o"""
+    if not openai_client:
+        raise ValueError('OPENAI_API_KEY is not configured')
+    
+    try:
+        print(f'Scraping URL: {url}')
+        
+        # Fetch the web page
+        response = requests.get(
+            url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            },
+            timeout=10
+        )
+        
+        # Parse HTML with BeautifulSoup
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Remove script and style elements
+        for script in soup(["script", "style", "noscript"]):
+            script.decompose()
+        
+        # Extract text content
+        page_text = ' '.join(soup.get_text().split())
+        
+        # Limit text length to avoid token limits (keep first 8000 characters)
+        limited_text = page_text[:8000]
+        
+        # Use GPT-4o to extract car information
+        extraction_prompt = f"""Extract car listing information from this web page content. Return ONLY a JSON object with the extracted data. If information is not available, use null. Make sure numbers are actual numbers, not strings.
+
+Required fields:
+- make: string (car make, e.g., "Toyota", "Honda")
+- model: string (car model, e.g., "Camry", "Civic")
+- year: number (car year, e.g., 2020)
+- miles: number (number of miles, e.g., 50000)
+- listingPrice: number (listing price in dollars, e.g., 15000)
+- tireLifeLeft: boolean (whether tires have life left - true for yes, false for no, null if not mentioned)
+- titleStatus: string ("clean", "rebuilt", "check_carfax", or null) - "clean" or "rebuilt" if mentioned, "check_carfax" if dealer provided a carfax link, null if not mentioned
+- carfaxDamageIncidents: string ("yes", "no", "unsure", "check_carfax", or null) - "yes" if carfax shows prior damage incidents, "no" if it doesn't, "check_carfax" if dealer provided a link but you haven't reviewed it, null if not mentioned
+- docFeeQuoted: number (doc fee amount quoted in dollars) - if not mentioned, use null
+- docFeeNegotiable: boolean (whether doc fee is negotiable - true for yes, false for no, null if not mentioned)
+- docFeeAgreed: number (doc fee agreed upon after negotiation in dollars) - if not mentioned, use null
+- lowestPrice: number (lowest price dealer will accept in dollars) - if not mentioned, use null
+
+Web page content:
+{limited_text}
+
+Return ONLY valid JSON in this exact format (no markdown, no code blocks):
+{{
+  "make": "string or null",
+  "model": "string or null",
+  "year": number or null,
+  "miles": number or null,
+  "listingPrice": number or null,
+  "tireLifeLeft": boolean or null,
+  "titleStatus": "string ('clean', 'rebuilt', 'check_carfax') or null",
+  "carfaxDamageIncidents": "string ('yes', 'no', 'unsure', 'check_carfax') or null",
+  "docFeeQuoted": number or null,
+  "docFeeNegotiable": boolean or null,
+  "docFeeAgreed": number or null,
+  "lowestPrice": number or null
+}}"""
+        
+        completion = openai_client.chat.completions.create(
+            model='gpt-4o',
+            messages=[
+                {'role': 'system', 'content': 'You are a data extraction assistant. Extract structured car listing data from web pages and return only valid JSON.'},
+                {'role': 'user', 'content': extraction_prompt}
+            ],
+            temperature=0.3,
+            response_format={'type': 'json_object'}
+        )
+        
+        response_text = completion.choices[0].message.content.strip()
+        
+        if not response_text:
+            raise ValueError('No response from OpenAI')
+        
+        # Parse JSON response
+        data = json.loads(response_text)
+        
+        # Ensure numbers are actually numbers
+        extracted_data = {
+            'make': data.get('make') or None,
+            'model': data.get('model') or None,
+            'year': int(data['year']) if data.get('year') is not None else None,
+            'miles': int(data['miles']) if data.get('miles') is not None else None,
+            'listingPrice': float(data['listingPrice']) if data.get('listingPrice') is not None else None,
+            'tireLifeLeft': bool(data['tireLifeLeft']) if data.get('tireLifeLeft') is not None else None,
+            'titleStatus': data.get('titleStatus', '').lower() if data.get('titleStatus') and data.get('titleStatus').lower() in ['clean', 'rebuilt', 'check_carfax'] else None,
+            'carfaxDamageIncidents': _normalize_carfax_value(data.get('carfaxDamageIncidents')),
+            'docFeeQuoted': float(data['docFeeQuoted']) if data.get('docFeeQuoted') is not None else None,
+            'docFeeNegotiable': bool(data['docFeeNegotiable']) if data.get('docFeeNegotiable') is not None else None,
+            'docFeeAgreed': float(data['docFeeAgreed']) if data.get('docFeeAgreed') is not None else None,
+            'lowestPrice': float(data['lowestPrice']) if data.get('lowestPrice') is not None else None,
+            'url': url,
+            'extractedAt': datetime.now()
+        }
+        
+        print('Extracted data from URL:', extracted_data)
+        return extracted_data
+    except Exception as error:
+        print(f'Error scraping URL: {error}')
+        raise
+
+
+def _normalize_carfax_value(value: Any) -> Optional[str]:
+    """Normalize carfax damage incidents value"""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 'yes' if value else 'no'
+    if isinstance(value, str):
+        lower = value.lower()
+        if lower in ['yes', 'no', 'unsure', 'check_carfax']:
+            return lower
+    return None
+
+
+async def build_conversation_transcript(thread_id: str, Message) -> str:
+    """Build conversation transcript from messages"""
+    from bson import ObjectId
+    messages = Message.find({'threadId': ObjectId(thread_id)}, sort=[('timestamp', 1)])
+    
+    transcript_lines = []
+    for msg in messages:
+        sender = 'Dealer' if msg['direction'] == 'inbound' else 'You'
+        transcript_lines.append(f"{sender}: {msg['body']}")
+    
+    return '\n'.join(transcript_lines)
+
+
+async def extract_car_listing_data(conversation_transcript: str) -> Dict[str, Any]:
+    """Extract car listing data from conversation using GPT-4o"""
+    if not openai_client:
+        raise ValueError('OPENAI_API_KEY is not configured')
+    
+    extraction_prompt = f"""Extract the following information from this conversation between a car buyer and dealer. Return ONLY a JSON object with the extracted data. If information is not available, use null. Make sure numbers are actual numbers, not strings.
+
+Required fields:
+- make: string (car make, e.g., "Toyota", "Honda")
+- model: string (car model, e.g., "Camry", "Civic")
+- year: number (car year, e.g., 2020)
+- miles: number (number of miles, e.g., 50000)
+- listingPrice: number (listing price in dollars, e.g., 15000)
+- tireLifeLeft: boolean (whether tires have life left - true for yes, false for no)
+- titleStatus: string ("clean", "rebuilt", "check_carfax", or null) - "clean" or "rebuilt" if mentioned, "check_carfax" if dealer provided a carfax link, null if not mentioned
+- carfaxDamageIncidents: string ("yes", "no", "unsure", "check_carfax", or null) - "yes" if carfax shows prior damage incidents, "no" if it doesn't, "check_carfax" if dealer provided a link but you haven't reviewed it, null if not mentioned
+- docFeeQuoted: number (doc fee amount quoted in dollars, e.g., 500)
+- docFeeNegotiable: boolean (whether doc fee is negotiable - true for yes, false for no)
+- docFeeAgreed: number (doc fee agreed upon after negotiation in dollars, e.g., 400)
+- lowestPrice: number (lowest price dealer will accept in dollars, e.g., 14000)
+
+Conversation transcript:
+{conversation_transcript}
+
+Return ONLY valid JSON in this exact format (no markdown, no code blocks):
+{{
+  "make": "string or null",
+  "model": "string or null",
+  "year": number or null,
+  "miles": number or null,
+  "listingPrice": number or null,
+  "tireLifeLeft": boolean or null,
+  "titleStatus": "string ('clean', 'rebuilt', 'check_carfax') or null",
+  "carfaxDamageIncidents": "string ('yes', 'no', 'unsure', 'check_carfax') or null",
+  "docFeeQuoted": number or null,
+  "docFeeNegotiable": boolean or null,
+  "docFeeAgreed": number or null,
+  "lowestPrice": number or null
+}}"""
+    
+    try:
+        completion = openai_client.chat.completions.create(
+            model='gpt-4o',
+            messages=[
+                {'role': 'system', 'content': 'You are a data extraction assistant. Extract structured data from conversations and return only valid JSON.'},
+                {'role': 'user', 'content': extraction_prompt}
+            ],
+            temperature=0.3,
+            response_format={'type': 'json_object'}
+        )
+        
+        response_text = completion.choices[0].message.content.strip()
+        
+        if not response_text:
+            raise ValueError('No response from OpenAI')
+        
+        data = json.loads(response_text)
+        
+        # Ensure numbers are actually numbers
+        extracted_data = {
+            'make': data.get('make') or None,
+            'model': data.get('model') or None,
+            'year': int(data['year']) if data.get('year') is not None else None,
+            'miles': int(data['miles']) if data.get('miles') is not None else None,
+            'listingPrice': float(data['listingPrice']) if data.get('listingPrice') is not None else None,
+            'tireLifeLeft': bool(data['tireLifeLeft']) if data.get('tireLifeLeft') is not None else None,
+            'titleStatus': data.get('titleStatus', '').lower() if data.get('titleStatus') and data.get('titleStatus').lower() in ['clean', 'rebuilt', 'check_carfax'] else None,
+            'carfaxDamageIncidents': _normalize_carfax_value(data.get('carfaxDamageIncidents')),
+            'docFeeQuoted': float(data['docFeeQuoted']) if data.get('docFeeQuoted') is not None else None,
+            'docFeeNegotiable': bool(data['docFeeNegotiable']) if data.get('docFeeNegotiable') is not None else None,
+            'docFeeAgreed': float(data['docFeeAgreed']) if data.get('docFeeAgreed') is not None else None,
+            'lowestPrice': float(data['lowestPrice']) if data.get('lowestPrice') is not None else None
+        }
+        
+        return extracted_data
+    except Exception as error:
+        print(f'Error extracting car listing data: {error}')
+        raise
+
+
+def dealer_says_will_get_back(message: str) -> bool:
+    """Detect if dealer says they'll get back to the agent"""
+    patterns = [
+        r'will get back',
+        r'get back to you',
+        r'will update you',
+        r'update you as soon',
+        r'will reach out',
+        r'reach out as soon',
+        r'will be in touch',
+        r'be in touch as soon',
+        r'working to get',
+        r'gathering.*information',
+        r'collecting.*information',
+        r'looking into',
+        r'will provide',
+        r'provide.*as soon'
+    ]
+    
+    message_lower = message.lower()
+    return any(re.search(pattern, message_lower) for pattern in patterns)
+
+
+async def message_contains_new_information(message: str, known_data: Optional[Dict[str, Any]] = None) -> bool:
+    """Check if message contains new information vs just acknowledgment"""
+    if not openai_client:
+        # Fallback: if no API key, assume it might have info
+        return True
+    
+    # Check for common acknowledgment phrases
+    acknowledgment_patterns = [
+        r'sounds good',
+        r'will get back',
+        r'get back to you',
+        r'will update you',
+        r'update you as soon',
+        r'will reach out',
+        r'reach out as soon',
+        r'will be in touch',
+        r'be in touch as soon',
+        r'working to get',
+        r'gathering.*information',
+        r'collecting.*information',
+        r'looking into',
+        r'will provide',
+        r'provide.*as soon',
+        r'thank you for your patience',
+        r'thank you for checking in',
+        r'still working',
+        r'still gathering',
+        r'still collecting'
+    ]
+    
+    message_lower = message.lower()
+    is_just_acknowledgment = (
+        any(re.search(pattern, message_lower) for pattern in acknowledgment_patterns) and
+        not re.search(r'\d+', message) and  # No numbers
+        '$' not in message  # No dollar signs
+    )
+    
+    if is_just_acknowledgment:
+        return False
+    
+    # Use GPT to check if message contains new information
+    try:
+        known_info_section = ''
+        if known_data:
+            known_fields = []
+            if known_data.get('make'):
+                known_fields.append(f"- Car make: {known_data['make']}")
+            if known_data.get('model'):
+                known_fields.append(f"- Car model: {known_data['model']}")
+            if known_data.get('year'):
+                known_fields.append(f"- Car year: {known_data['year']}")
+            if known_data.get('miles') is not None:
+                known_fields.append(f"- Number of miles: {known_data['miles']:,}")
+            if known_data.get('listingPrice') is not None:
+                known_fields.append(f"- Listing price: ${known_data['listingPrice']:,}")
+            if known_data.get('tireLifeLeft') is not None:
+                known_fields.append(f"- Tires have life left: {'Yes' if known_data['tireLifeLeft'] else 'No'}")
+            if known_data.get('titleStatus'):
+                title_display = 'Check Carfax (link provided)' if known_data['titleStatus'] == 'check_carfax' else known_data['titleStatus']
+                known_fields.append(f"- Title status: {title_display}")
+            if known_data.get('carfaxDamageIncidents') is not None:
+                carfax_display = {
+                    'yes': 'Yes',
+                    'no': 'No',
+                    'unsure': 'Unsure',
+                    'check_carfax': 'Check Carfax (link provided)'
+                }.get(known_data['carfaxDamageIncidents'], 'Unknown')
+                known_fields.append(f"- Carfax damage incidents: {carfax_display}")
+            if known_data.get('docFeeQuoted') is not None:
+                known_fields.append(f"- Doc fee quoted: ${known_data['docFeeQuoted']:,}")
+            if known_data.get('docFeeNegotiable') is not None:
+                known_fields.append(f"- Doc fee negotiable: {'Yes' if known_data['docFeeNegotiable'] else 'No'}")
+            if known_data.get('docFeeAgreed') is not None:
+                known_fields.append(f"- Doc fee agreed: ${known_data['docFeeAgreed']:,}")
+            if known_data.get('lowestPrice') is not None:
+                known_fields.append(f"- Lowest price: ${known_data['lowestPrice']:,}")
+            
+            if known_fields:
+                known_info_section = f"\n\nKnown information:\n" + '\n'.join(known_fields)
+        
+        prompt = f"""Does this dealer message contain NEW information about the car (make, model, year, miles, price, tire condition, title status, carfax, doc fee, etc.) that is not already known?{known_info_section}
+
+Dealer message: "{message}"
+
+Respond with ONLY "YES" if the message contains new information (like specific numbers, prices, details about the car, etc.), or "NO" if it's just an acknowledgment, confirmation, or promise to get back later."""
+        
+        completion = openai_client.chat.completions.create(
+            model='gpt-4o',
+            messages=[
+                {'role': 'system', 'content': 'You are a helpful assistant that determines if a message contains new information.'},
+                {'role': 'user', 'content': prompt}
+            ],
+            temperature=0.3,
+            max_tokens=10
+        )
+        
+        response = completion.choices[0].message.content.strip().upper()
+        return response == 'YES'
+    except Exception as error:
+        print(f'Error checking for new information: {error}')
+        # On error, assume it might have info to be safe
+        return True
+
+
+async def get_ai_response(conversation_transcript: str, known_data: Optional[Dict[str, Any]] = None, is_waiting_for_response: bool = False) -> str:
+    """Get AI agent response using GPT-4o"""
+    if not openai_client:
+        raise ValueError('OPENAI_API_KEY is not configured')
+    
+    # Build known information section
+    known_info_section = ''
+    if known_data:
+        known_fields = []
+        if known_data.get('make'):
+            known_fields.append(f"- Car make: {known_data['make']}")
+        if known_data.get('model'):
+            known_fields.append(f"- Car model: {known_data['model']}")
+        if known_data.get('year'):
+            known_fields.append(f"- Car year: {known_data['year']}")
+        if known_data.get('miles') is not None:
+            known_fields.append(f"- Number of miles: {known_data['miles']:,}")
+        if known_data.get('listingPrice') is not None:
+            known_fields.append(f"- Listing price: ${known_data['listingPrice']:,}")
+        if known_data.get('tireLifeLeft') is not None:
+            known_fields.append(f"- Tires have life left: {'Yes' if known_data['tireLifeLeft'] else 'No'}")
+        if known_data.get('titleStatus'):
+            title_display = 'Check Carfax (link provided)' if known_data['titleStatus'] == 'check_carfax' else known_data['titleStatus']
+            known_fields.append(f"- Title status: {title_display}")
+        if known_data.get('carfaxDamageIncidents') is not None:
+            carfax_display = {
+                'yes': 'Yes',
+                'no': 'No',
+                'unsure': 'Unsure',
+                'check_carfax': 'Check Carfax (link provided)'
+            }.get(known_data['carfaxDamageIncidents'], 'Unknown')
+            known_fields.append(f"- Carfax damage incidents: {carfax_display}")
+        if known_data.get('docFeeQuoted') is not None:
+            known_fields.append(f"- Doc fee quoted: ${known_data['docFeeQuoted']:,}")
+        if known_data.get('docFeeNegotiable') is not None:
+            known_fields.append(f"- Doc fee negotiable: {'Yes' if known_data['docFeeNegotiable'] else 'No'}")
+        if known_data.get('docFeeAgreed') is not None:
+            known_fields.append(f"- Doc fee agreed: ${known_data['docFeeAgreed']:,}")
+        if known_data.get('lowestPrice') is not None:
+            known_fields.append(f"- Lowest price: ${known_data['lowestPrice']:,}")
+        
+        if known_fields:
+            known_info_section = f"\n\nIMPORTANT: You already have the following information (do NOT ask for these again):\n" + '\n'.join(known_fields) + "\n\nOnly ask for information you don't already have."
+    
+    system_prompt = f"""You are an expert used car buyer. You are in a conversation with a used car dealer, who is selling a car that you indicated interest in online.
+
+Your task is to get the following pieces of information from the dealer:
+1. Car make
+2. Car model
+3. Car year
+4. Number of miles on the car
+5. Listing price
+6. Whether the tires have life left (yes or no)
+7. Is it a clean title or rebuilt title (clean or rebuilt)
+8. Does the carfax show any prior damage incidents (yes or no)
+9. Doc fee amount (the amount they quote)
+10. Whether the doc fee is negotiable (yes or no)
+11. Doc fee agreed upon (after negotiation, if applicable)
+12. Lowest price dealer will accept{known_info_section}
+
+Guidelines:
+1. Maintain a professional, but not overly friendly tone. Do not sound too robotic - you are impersonating a human who is a savvy used car buyer. Do not use perfect punctuation (e.g., 'Can you remind me the car make/model and year? Appreciate it').
+2. Try to obtain the pieces of information above in order (e.g., don't ask for the age of the tires before you know the car's make)
+3. Where it makes sense, I would ask for the car make, model, year and number of miles in one message
+4. Once you have all information from items 1-9 (make, model, year, miles, listing price, tire life status, title status, carfax damage incidents, and doc fee quoted), ask about item 10 (whether the doc fee is negotiable). If the doc fee is negotiable and greater than $150, try to negotiate a lower doc fee. Then negotiate the listing price. If the tires do not have life left, if it's a rebuilt title, or if there are carfax damage incidents, mention those as reasons why you are trying to negotiate. Do not attempt an unreasonable amount of negotiation - if the dealer is not willing to negotiate, move on to the next question. If they lower the price more than 15% from the listing price, accept the deal. After negotiation, record the final agreed-upon doc fee in item 11.
+5. DO NOT ask for information you already have. If you already know the make, model, year, miles, or listing price, skip asking for those and move on to information you don't have.
+6. CRITICAL: If the dealer says that they will work on getting information for you, will get back to you, will update you, or similar phrases indicating they need time to gather information, you should acknowledge this. However, if the dealer ALSO asks a question in the same message, you must answer their question first, then acknowledge that you'll wait. For example, if they say "I'll discuss with my GM. Do you have a trade?", respond with something like "No trade, and I'll be financing. Thanks!" and then return '# WAITING #'. If they only say they'll get back without asking a question, respond with ONLY a simple "Thank you" or "Thanks" and then return '# WAITING #'. This tells the system to stop responding until the dealer provides actual new information.
+7. If the dealer indicates that they have sent a link to the carfax (whether in the thread or in a separate message), do not continue asking for the carfax, and just make the values for 7 and 8 'check_carfax'.
+
+Return nothing but the message you would like to send the dealer (e.g., do not pre-pend "You: " or something similar to message). If the dealer says they'll get back to you, return '# WAITING #' after saying thank you. If you believe you have captured all of the information above, simply return '# CONVO COMPLETE #'. Do not return '# CONVO COMPLETE #' unless you are absolutely certain you have all of the information required."""
+    
+    user_prompt = f"""Here is the transcript of the conversation so far:
+
+{conversation_transcript or '(No conversation yet)'}
+
+Please output what you think your next message to the dealer should be."""
+    
+    try:
+        completion = openai_client.chat.completions.create(
+            model='gpt-4o',
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=200
+        )
+        
+        response = completion.choices[0].message.content.strip()
+        
+        if not response:
+            raise ValueError('No response from OpenAI')
+        
+        return response
+    except Exception as error:
+        print(f'Error calling OpenAI: {error}')
+        raise
+
+
+async def send_sms(to: str, message: str, retries: int = 3) -> Dict[str, Any]:
+    """Send SMS via Mobile Text Alerts with retry logic"""
+    if not MTA_API_KEY:
+        raise ValueError('MTA_API_KEY is not configured')
+    
+    payload = {
+        'subscribers': [to],
+        'message': message,
+        'longcodeId': MTA_LONGCODE_ID
+    }
+    
+    for attempt in range(1, retries + 1):
+        try:
+            print(f'Sending message (attempt {attempt}/{retries}): {message}')
+            
+            if attempt > 1:
+                print(f'Sending payload: {payload}')
+            
+            response = requests.post(
+                f'{MTA_API_BASE_URL}/send',
+                json=payload,
+                headers={
+                    'Authorization': f'Bearer {MTA_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as error:
+            is_network_error = (
+                isinstance(error, requests.exceptions.ConnectionError) or
+                isinstance(error, requests.exceptions.Timeout)
+            )
+            
+            if is_network_error and attempt < retries:
+                delay = min(1000 * (2 ** (attempt - 1)), 5000)  # Exponential backoff, max 5 seconds
+                print(f'Network error on attempt {attempt}, retrying in {delay}ms... {error}')
+                await asyncio.sleep(delay / 1000)
+                continue
+            
+            # If it's the last attempt or not a network error, raise
+            print(f'Error sending SMS via Mobile Text Alerts: {error}')
+            if attempt == 1:
+                print(f'Request payload was: {payload}')
+            raise
+

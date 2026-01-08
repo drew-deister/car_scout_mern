@@ -1,0 +1,520 @@
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
+import os
+import asyncio
+import random
+import re
+from datetime import datetime
+from bson import ObjectId
+from dotenv import load_dotenv
+
+from models import Thread, Message, CarListing
+from utils import (
+    extract_urls, scrape_and_extract_car_data, build_conversation_transcript,
+    extract_car_listing_data, message_contains_new_information, get_ai_response,
+    send_sms, MTA_PHONE_NUMBER, MTA_API_KEY, openai_client
+)
+
+load_dotenv()
+
+app = FastAPI()
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Track pending responses by thread ID
+pending_responses = {}
+
+# Mobile Text Alerts webhook payload model
+class SMSWebhook(BaseModel):
+    fromNumber: str
+    toNumber: Optional[str] = None
+    message: str
+    replyId: Optional[str] = None
+    timestamp: Optional[str] = None
+    tags: Optional[Dict[str, Any]] = None
+
+
+@app.get("/api")
+async def root():
+    return {"message": "Car Scout API is running"}
+
+
+@app.get("/api/test-db")
+async def test_db():
+    from models import client
+    try:
+        # Test connection
+        client.admin.command('ping')
+        return {
+            "connected": True,
+            "state": "connected",
+            "message": "MongoDB connection is active!"
+        }
+    except Exception as e:
+        return {
+            "connected": False,
+            "state": "disconnected",
+            "message": f"MongoDB connection error: {str(e)}"
+        }
+
+
+@app.get("/api/templates")
+async def get_templates():
+    import requests
+    from utils import MTA_API_BASE_URL, MTA_API_KEY
+    
+    if not MTA_API_KEY:
+        raise HTTPException(status_code=500, detail="MTA_API_KEY is not configured in environment variables")
+    
+    try:
+        response = requests.get(
+            f"{MTA_API_BASE_URL}/templates",
+            headers={
+                "Authorization": f"Bearer {MTA_API_KEY}",
+                "Content-Type": "application/json"
+            }
+        )
+        response.raise_for_status()
+        return {
+            "success": True,
+            "templates": response.json()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch templates: {str(e)}")
+
+
+@app.post("/api/register-webhook")
+async def register_webhook(webhook_data: Dict[str, Any]):
+    import requests
+    from utils import MTA_API_BASE_URL, MTA_API_KEY
+    
+    if not MTA_API_KEY:
+        raise HTTPException(status_code=500, detail="MTA_API_KEY is not configured in environment variables")
+    
+    webhook_url = webhook_data.get("webhookUrl")
+    if not webhook_url:
+        raise HTTPException(status_code=400, detail="webhookUrl is required")
+    
+    try:
+        response = requests.post(
+            f"{MTA_API_BASE_URL}/webhooks",
+            json={
+                "event": "message-reply",
+                "url": webhook_url,
+                "secret": webhook_data.get("secret") or os.getenv("MTA_WEBHOOK_SECRET", "your-secret-key"),
+                "alertEmail": webhook_data.get("alertEmail") or os.getenv("MTA_ALERT_EMAIL", "")
+            },
+            headers={
+                "Authorization": f"Bearer {MTA_API_KEY}",
+                "Content-Type": "application/json"
+            }
+        )
+        response.raise_for_status()
+        return {
+            "success": True,
+            "message": "Webhook registered successfully",
+            "data": response.json()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to register webhook: {str(e)}")
+
+
+@app.post("/api/webhook/sms")
+async def sms_webhook(webhook: SMSWebhook):
+    try:
+        sender_phone = webhook.fromNumber
+        recipient_phone = webhook.toNumber or "unknown"
+        message_body = webhook.message
+        
+        if not sender_phone or not message_body:
+            raise HTTPException(status_code=400, detail="Missing required fields")
+        
+        # Filter out Mobile Text Alerts automatic opt-in messages
+        opt_in_pattern = re.compile(r'Thanks for opting in to receive messages from us!', re.IGNORECASE)
+        if opt_in_pattern.search(message_body):
+            print("⚠️  Ignoring Mobile Text Alerts automatic opt-in message")
+            return {"success": True, "message": "Opt-in message ignored"}
+        
+        # Find or create thread
+        thread = Thread.find_one({"phoneNumber": sender_phone})
+        
+        if not thread:
+            timestamp = datetime.now()
+            if webhook.timestamp:
+                try:
+                    timestamp = datetime.fromisoformat(webhook.timestamp.replace('Z', '+00:00'))
+                except:
+                    timestamp = datetime.now()
+            
+            thread_data = {
+                "phoneNumber": sender_phone,
+                "lastMessage": message_body,
+                "lastMessageTime": timestamp,
+                "unreadCount": 1,
+                "conversationComplete": False,
+                "waitingForDealerResponse": False
+            }
+            thread_id = Thread.create(thread_data)
+            thread = Thread.find_by_id(thread_id)
+        else:
+            timestamp = datetime.now()
+            if webhook.timestamp:
+                try:
+                    timestamp = datetime.fromisoformat(webhook.timestamp.replace('Z', '+00:00'))
+                except:
+                    timestamp = datetime.now()
+            
+            Thread.update_one(
+                {"_id": thread["_id"]},
+                {
+                    "lastMessage": message_body,
+                    "lastMessageTime": timestamp,
+                    "unreadCount": thread.get("unreadCount", 0) + 1
+                }
+            )
+            thread = Thread.find_by_id(str(thread["_id"]))
+        
+        # Save incoming message
+        message_timestamp = datetime.now()
+        if webhook.timestamp:
+            try:
+                message_timestamp = datetime.fromisoformat(webhook.timestamp.replace('Z', '+00:00'))
+            except:
+                message_timestamp = datetime.now()
+        
+        message_data = {
+            "threadId": thread["_id"],
+            "from": sender_phone,
+            "to": recipient_phone,
+            "body": message_body,
+            "direction": "inbound",
+            "timestamp": message_timestamp,
+            "externalMessageId": webhook.replyId or (webhook.tags.get("messageId") if webhook.tags else None)
+        }
+        Message.create(message_data)
+        
+        # Check for URLs and scrape if found
+        urls = extract_urls(message_body)
+        if urls:
+            print(f"Found {len(urls)} URL(s) in message: {urls}")
+            try:
+                extracted_data = await scrape_and_extract_car_data(urls[0])
+                Thread.update_one(
+                    {"_id": thread["_id"]},
+                    {"extractedUrlData": extracted_data}
+                )
+                print(f"✅ Extracted and stored data from URL: {extracted_data}")
+            except Exception as scrape_error:
+                print(f"Error scraping URL: {scrape_error}")
+        
+        # Check if conversation is already complete
+        if thread.get("conversationComplete"):
+            print("ℹ️  Conversation already complete, not generating response")
+            return {"success": True, "message": "Conversation complete, no response sent"}
+        
+        # If waiting for dealer response, check if message has new information
+        if thread.get("waitingForDealerResponse"):
+            print("ℹ️  Currently waiting for dealer response, checking if message contains new information...")
+            known_data = thread.get("extractedUrlData")
+            has_new_info = await message_contains_new_information(message_body, known_data)
+            
+            if not has_new_info:
+                print("ℹ️  Message is just an acknowledgment, not responding")
+                return {"success": True, "message": "Waiting for dealer response, no new information in message"}
+            else:
+                print("✅ Message contains new information, clearing waiting state and responding")
+                Thread.update_one(
+                    {"_id": thread["_id"]},
+                    {"waitingForDealerResponse": False}
+                )
+        
+        # Cancel any pending response for this thread
+        thread_id_string = str(thread["_id"])
+        if thread_id_string in pending_responses:
+            pending_timeout = pending_responses[thread_id_string]
+            pending_timeout["task"].cancel()
+            del pending_responses[thread_id_string]
+            print("⚠️  Cancelled pending response due to new message")
+        
+        # Generate AI agent response
+        try:
+            transcript = await build_conversation_transcript(thread_id_string, Message)
+            print(f"Conversation transcript: {transcript}")
+            
+            known_data = thread.get("extractedUrlData")
+            ai_response = await get_ai_response(transcript, known_data, thread.get("waitingForDealerResponse", False))
+            print(f"AI agent response: {ai_response}")
+            
+            # Check if we should enter waiting state
+            if "# WAITING #" in ai_response:
+                print("✅ Agent entering waiting state - dealer said they will get back")
+                thank_you_message = ai_response.replace("# WAITING #", "").strip() or "Thank you"
+                
+                try:
+                    await send_sms(sender_phone, thank_you_message)
+                    
+                    # Save thank you message
+                    Message.create({
+                        "threadId": thread["_id"],
+                        "from": MTA_PHONE_NUMBER,
+                        "to": sender_phone,
+                        "body": thank_you_message,
+                        "direction": "outbound",
+                        "timestamp": datetime.now()
+                    })
+                    
+                    # Mark thread as waiting
+                    Thread.update_one(
+                        {"_id": thread["_id"]},
+                        {
+                            "waitingForDealerResponse": True,
+                            "lastMessage": thank_you_message,
+                            "lastMessageTime": datetime.now()
+                        }
+                    )
+                    print("✅ Thank you message sent, now waiting for dealer response")
+                except Exception as send_error:
+                    print(f"Error sending thank you message: {send_error}")
+                
+                return {"success": True, "message": "Entered waiting state, no further responses until dealer provides new info"}
+            
+            # Check if conversation is complete
+            if ai_response == "# CONVO COMPLETE #":
+                print("✅ Conversation marked as complete by AI agent")
+                
+                thank_you_message = "Thanks - this sounds like a great option for me, let me get back to you"
+                try:
+                    await send_sms(sender_phone, thank_you_message)
+                    
+                    Message.create({
+                        "threadId": thread["_id"],
+                        "from": MTA_PHONE_NUMBER,
+                        "to": sender_phone,
+                        "body": thank_you_message,
+                        "direction": "outbound",
+                        "timestamp": datetime.now()
+                    })
+                    print("✅ Thank you message sent to dealer")
+                except Exception as send_error:
+                    print(f"Error sending thank you message: {send_error}")
+                
+                # Mark thread as complete
+                Thread.update_one(
+                    {"_id": thread["_id"]},
+                    {
+                        "conversationComplete": True,
+                        "lastMessage": thank_you_message,
+                        "lastMessageTime": datetime.now()
+                    }
+                )
+                
+                # Extract and save car listing data
+                try:
+                    extracted_data = await extract_car_listing_data(transcript)
+                    print(f"Extracted car listing data: {extracted_data}")
+                    
+                    car_listing = CarListing.find_one({"threadId": thread["_id"]})
+                    if car_listing:
+                        CarListing.update_one(
+                            {"threadId": thread["_id"]},
+                            {**extracted_data, "conversationComplete": True}
+                        )
+                        print("✅ Updated existing car listing")
+                    else:
+                        CarListing.create({
+                            "threadId": thread["_id"],
+                            "phoneNumber": sender_phone,
+                            **extracted_data,
+                            "conversationComplete": True,
+                            "extractedAt": datetime.now()
+                        })
+                        print("✅ Saved car listing data to MongoDB")
+                except Exception as extract_error:
+                    print(f"Error extracting/saving car listing data: {extract_error}")
+            else:
+                # Schedule delayed response
+                delay_ms = random.randint(300000, 330000)  # 5-5.5 minutes
+                print(f"⏱️  Scheduling response to be sent in {delay_ms // 1000} seconds")
+                
+                async def send_delayed_response():
+                    try:
+                        await asyncio.sleep(delay_ms / 1000)
+                        
+                        # Check if this response was cancelled
+                        if thread_id_string not in pending_responses:
+                            print("⚠️  Response cancelled, not sending")
+                            return
+                        
+                        # Send AI-generated response
+                        await send_sms(sender_phone, ai_response)
+                        
+                        # Save outbound message
+                        Message.create({
+                            "threadId": thread["_id"],
+                            "from": MTA_PHONE_NUMBER,
+                            "to": sender_phone,
+                            "body": ai_response,
+                            "direction": "outbound",
+                            "timestamp": datetime.now()
+                        })
+                        
+                        # Update thread
+                        Thread.update_one(
+                            {"_id": thread["_id"]},
+                            {
+                                "lastMessage": ai_response,
+                                "lastMessageTime": datetime.now()
+                            }
+                        )
+                        
+                        # Remove from pending responses
+                        if thread_id_string in pending_responses:
+                            del pending_responses[thread_id_string]
+                        
+                        print("✅ AI agent response sent successfully")
+                    except Exception as send_error:
+                        if thread_id_string in pending_responses:
+                            del pending_responses[thread_id_string]
+                        print(f"Error sending AI agent response: {send_error}")
+                
+                task = asyncio.create_task(send_delayed_response())
+                pending_responses[thread_id_string] = {"task": task, "aiResponse": ai_response}
+        except Exception as reply_error:
+            print(f"Error generating AI agent response: {reply_error}")
+        
+        return {"success": True, "message": "Message processed"}
+    except Exception as error:
+        print(f"Error processing incoming SMS: {error}")
+        raise HTTPException(status_code=500, detail="Error processing message")
+
+
+def serialize_document(doc):
+    """Convert MongoDB document to JSON-serializable format"""
+    if doc is None:
+        return None
+    if isinstance(doc, dict):
+        result = {}
+        for key, value in doc.items():
+            if isinstance(value, ObjectId):
+                result[key] = str(value)
+            elif isinstance(value, datetime):
+                result[key] = value.isoformat()
+            elif isinstance(value, dict):
+                result[key] = serialize_document(value)
+            elif isinstance(value, list):
+                result[key] = [serialize_document(item) for item in value]
+            else:
+                result[key] = value
+        return result
+    return doc
+
+
+@app.get("/api/threads")
+async def get_threads():
+    try:
+        threads = Thread.find(sort=[("lastMessageTime", -1)])
+        # Convert ObjectId to string for JSON serialization
+        return [serialize_document(thread) for thread in threads]
+    except Exception as error:
+        print(f"Error fetching threads: {error}")
+        raise HTTPException(status_code=500, detail="Failed to fetch threads")
+
+
+@app.get("/api/threads/{thread_id}/messages")
+async def get_messages(thread_id: str):
+    try:
+        # Verify thread exists
+        thread = Thread.find_by_id(thread_id)
+        if not thread:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        
+        # Get all messages for this thread
+        messages = Message.find({"threadId": ObjectId(thread_id)}, sort=[("timestamp", 1)])
+        
+        # Mark thread as read
+        Thread.update_one(
+            {"_id": ObjectId(thread_id)},
+            {"unreadCount": 0}
+        )
+        
+        # Convert ObjectId to string and serialize
+        return [serialize_document(message) for message in messages]
+    except HTTPException:
+        raise
+    except Exception as error:
+        print(f"Error fetching messages: {error}")
+        raise HTTPException(status_code=500, detail="Failed to fetch messages")
+
+
+@app.get("/api/car-listings")
+async def get_car_listings():
+    try:
+        from models import client
+        # Check if MongoDB is connected
+        try:
+            client.admin.command('ping')
+        except:
+            raise HTTPException(
+                status_code=503,
+                detail="Database unavailable - MongoDB connection is not active. Please check your connection string and network connectivity."
+            )
+        
+        listings = CarListing.find(sort=[("extractedAt", -1)])
+        
+        # Convert ObjectId to string and populate thread info
+        result = []
+        for listing in listings:
+            listing_serialized = serialize_document(listing)
+            thread_id = listing.get("threadId")
+            if thread_id:
+                thread = Thread.find_by_id(str(thread_id))
+                if thread:
+                    listing_serialized["thread"] = serialize_document(thread)
+            result.append(listing_serialized)
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as error:
+        print(f"Error fetching car listings: {error}")
+        raise HTTPException(status_code=500, detail="Failed to fetch car listings")
+
+
+@app.get("/api/threads/{thread_id}/car-listing")
+async def get_thread_car_listing(thread_id: str):
+    try:
+        car_listing = CarListing.find_one({"threadId": ObjectId(thread_id)})
+        
+        if not car_listing:
+            raise HTTPException(status_code=404, detail="Car listing not found for this thread")
+        
+        # Serialize car listing
+        car_listing_serialized = serialize_document(car_listing)
+        
+        # Populate thread info
+        thread = Thread.find_by_id(thread_id)
+        if thread:
+            car_listing_serialized["thread"] = serialize_document(thread)
+        
+        return car_listing_serialized
+    except HTTPException:
+        raise
+    except Exception as error:
+        print(f"Error fetching car listing: {error}")
+        raise HTTPException(status_code=500, detail="Failed to fetch car listing")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 5001))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
