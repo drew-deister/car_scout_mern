@@ -52,9 +52,13 @@ const CarListings = () => {
             <p><strong>Year:</strong> {listing.year || 'N/A'}</p>
             <p><strong>Miles:</strong> {listing.miles ? listing.miles.toLocaleString() : 'N/A'}</p>
             <p><strong>Listing Price:</strong> {listing.listingPrice ? `$${listing.listingPrice.toLocaleString()}` : 'N/A'}</p>
-            <p><strong>Tire Age:</strong> {listing.tireAge !== null ? `${listing.tireAge} years` : 'N/A'}</p>
+            <p><strong>Tires Have Life Left:</strong> {listing.tireLifeLeft !== null ? (listing.tireLifeLeft ? 'Yes' : 'No') : 'N/A'}</p>
+            <p><strong>Title Status:</strong> {listing.titleStatus ? listing.titleStatus.charAt(0).toUpperCase() + listing.titleStatus.slice(1) : 'N/A'}</p>
+            <p><strong>Carfax Damage Incidents:</strong> {listing.carfaxDamageIncidents !== null ? (listing.carfaxDamageIncidents ? 'Yes' : 'No') : 'N/A'}</p>
+            <p><strong>Doc Fee Quoted:</strong> {listing.docFeeQuoted ? `$${listing.docFeeQuoted.toLocaleString()}` : 'N/A'}</p>
+            <p><strong>Doc Fee Negotiable:</strong> {listing.docFeeNegotiable !== null ? (listing.docFeeNegotiable ? 'Yes' : 'No') : 'N/A'}</p>
+            <p><strong>Doc Fee Agreed:</strong> {listing.docFeeAgreed ? `$${listing.docFeeAgreed.toLocaleString()}` : 'N/A'}</p>
             <p><strong>Lowest Price:</strong> {listing.lowestPrice ? `$${listing.lowestPrice.toLocaleString()}` : 'N/A'}</p>
-            <p><strong>Dock Fee:</strong> {listing.dockFee ? `$${listing.dockFee.toLocaleString()}` : 'N/A'}</p>
             <p><strong>Phone:</strong> {listing.phoneNumber || 'N/A'}</p>
           </div>
         </div>

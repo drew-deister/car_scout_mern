@@ -33,16 +33,34 @@ const carListingSchema = new mongoose.Schema({
     type: Number,
     default: null
   },
-  tireAge: {
-    type: Number,
+  tireLifeLeft: {
+    type: Boolean,
     default: null
   },
   lowestPrice: {
     type: Number,
     default: null
   },
-  dockFee: {
+  docFeeQuoted: {
     type: Number,
+    default: null
+  },
+  docFeeAgreed: {
+    type: Number,
+    default: null
+  },
+  docFeeNegotiable: {
+    type: Boolean,
+    default: null
+  },
+  titleStatus: {
+    type: String,
+    enum: ['clean', 'rebuilt', 'check_carfax', null],
+    default: null
+  },
+  carfaxDamageIncidents: {
+    type: String,
+    enum: ['yes', 'no', 'unsure', 'check_carfax', null],
     default: null
   },
   // Metadata

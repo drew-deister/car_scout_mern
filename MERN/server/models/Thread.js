@@ -26,13 +26,25 @@ const threadSchema = new mongoose.Schema({
       year: Number,
       miles: Number,
       listingPrice: Number,
-      tireAge: Number,
+      tireLifeLeft: Boolean,
       lowestPrice: Number,
-      dockFee: Number,
+      docFeeQuoted: Number,
+      docFeeAgreed: Number,
+      docFeeNegotiable: Boolean,
+      titleStatus: String,
+      carfaxDamageIncidents: String,
       url: String,
       extractedAt: Date
     },
     default: null
+  },
+  conversationComplete: {
+    type: Boolean,
+    default: false
+  },
+  waitingForDealerResponse: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true
