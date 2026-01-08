@@ -9,6 +9,14 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
+# Playwright for JavaScript-rendered content
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+    print("⚠️  Playwright not installed. JavaScript-rendered content may not be captured. Install with: pip install playwright && playwright install chromium")
+
 load_dotenv()
 
 # OpenAI configuration
@@ -27,44 +35,246 @@ if MTA_AUTO_REPLY_TEMPLATE_ID:
         MTA_AUTO_REPLY_TEMPLATE_ID = None
 
 
-def extract_urls(text: str) -> List[str]:
-    """Extract URLs from text"""
-    url_regex = r'(https?://[^\s]+)'
-    urls = re.findall(url_regex, text)
-    return urls
+async def detect_and_extract_url(message: str) -> Optional[str]:
+    """
+    Step 1: Use GPT-4o to detect if there's a link in the message and extract it.
+    Returns the URL if found, None otherwise.
+    """
+    if not openai_client:
+        # Fallback to regex if OpenAI is not configured
+        url_regex = r'(https?://[^\s]+)'
+        urls = re.findall(url_regex, message)
+        return urls[0] if urls else None
+    
+    try:
+        detection_prompt = f"""Analyze this message and determine if it contains any URLs or links. 
+If a URL is found, return ONLY the complete URL. If no URL is found, return null.
+
+Message: {message}
+
+Return ONLY a JSON object in this format:
+{{
+  "hasUrl": true or false,
+  "url": "complete URL string or null"
+}}"""
+        
+        completion = openai_client.chat.completions.create(
+            model='gpt-4o',
+            messages=[
+                {'role': 'system', 'content': 'You are a URL detection assistant. Analyze messages and extract URLs if present. Return only valid JSON.'},
+                {'role': 'user', 'content': detection_prompt}
+            ],
+            temperature=0.1,
+            response_format={'type': 'json_object'}
+        )
+        
+        response_text = completion.choices[0].message.content.strip()
+        if not response_text:
+            return None
+        
+        data = json.loads(response_text)
+        
+        if data.get('hasUrl') and data.get('url'):
+            url = data.get('url')
+            print(f"🔗 GPT-4o detected URL in message: {url}")
+            return url
+        
+        print("ℹ️  GPT-4o found no URL in message")
+        return None
+    except Exception as error:
+        print(f"⚠️  Error detecting URL with GPT-4o, falling back to regex: {error}")
+        # Fallback to regex
+        url_regex = r'(https?://[^\s]+)'
+        urls = re.findall(url_regex, message)
+        return urls[0] if urls else None
 
 
 async def scrape_and_extract_car_data(url: str) -> Dict[str, Any]:
-    """Scrape web page and extract car information using GPT-4o"""
+    """
+    Steps 2 & 3: Fetch HTML from URL and extract car data using GPT-4o
+    Step 2: Fetch and parse HTML
+    Step 3: Send HTML to GPT-4o for data extraction
+    """
     if not openai_client:
         raise ValueError('OPENAI_API_KEY is not configured')
     
     try:
-        print(f'Scraping URL: {url}')
+        print(f'🌐 Step 2: Fetching HTML from URL: {url}')
         
-        # Fetch the web page
-        response = requests.get(
-            url,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            },
-            timeout=10
-        )
+        html_content = None
+        
+        # Try using Playwright for JavaScript-rendered content first
+        if PLAYWRIGHT_AVAILABLE:
+            try:
+                print("   Using Playwright to render JavaScript content...")
+                async with async_playwright() as p:
+                    # Launch browser with more realistic settings to avoid bot detection
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=[
+                            '--disable-blink-features=AutomationControlled',
+                            '--disable-dev-shm-usage',
+                            '--no-sandbox'
+                        ]
+                    )
+                    
+                    # Create a new context with realistic viewport and user agent
+                    context = await browser.new_context(
+                        viewport={'width': 1920, 'height': 1080},
+                        user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        locale='en-US',
+                        timezone_id='America/New_York'
+                    )
+                    
+                    page = await context.new_page()
+                    
+                    # Add extra headers to look more like a real browser
+                    await page.set_extra_http_headers({
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Cache-Control': 'max-age=0'
+                    })
+                    
+                    # Navigate to the page with multiple wait strategies
+                    print("   Navigating to page and waiting for content...")
+                    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    
+                    # Wait for network to be idle
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=10000)
+                    except:
+                        print("   Network didn't become idle, continuing anyway...")
+                    
+                    # Wait additional time for JavaScript to render
+                    await asyncio.sleep(3)
+                    
+                    # Try to wait for common car listing elements
+                    try:
+                        # Wait for any of these common elements that indicate page loaded
+                        await page.wait_for_selector('h1, [class*="price"], [class*="Price"], [data-testid*="price"]', timeout=5000)
+                    except:
+                        print("   Couldn't find expected elements, but continuing...")
+                    
+                    # Scroll down to trigger lazy loading
+                    await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                    await asyncio.sleep(1)
+                    await page.evaluate('window.scrollTo(0, 0)')
+                    await asyncio.sleep(1)
+                    
+                    # Check if we got an error page
+                    page_text_preview = await page.inner_text('body')
+                    page_title = await page.title()
+                    
+                    if 'unavailable' in page_text_preview.lower() or 'error' in page_text_preview.lower() or len(page_text_preview) < 500:
+                        print(f"   ⚠️  Page may be showing an error or is blocked.")
+                        print(f"   Page title: {page_title}")
+                        print(f"   Content preview: {page_text_preview[:200]}...")
+                        print(f"   ⚠️  Autotrader may be blocking automated access. Will try to extract what we can.")
+                    
+                    # Get the fully rendered HTML (even if it's an error page, might have some data)
+                    html_content = await page.content()
+                    await browser.close()
+                    
+                    print(f"✅ Step 2 complete: Fetched {len(html_content)} characters of HTML")
+            except Exception as playwright_error:
+                print(f"⚠️  Playwright failed ({playwright_error}), falling back to requests...")
+                html_content = None
+        
+        # Fallback to requests if Playwright not available or failed
+        if not html_content:
+            print("   Using requests (may miss JavaScript-rendered content)...")
+            response = requests.get(
+                url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                },
+                timeout=10
+            )
+            html_content = response.text
+            print(f"✅ Step 2 complete: Fetched {len(html_content)} characters of HTML")
         
         # Parse HTML with BeautifulSoup
-        soup = BeautifulSoup(response.text, 'html.parser')
+        soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Remove script and style elements
+        # Try to find JSON-LD structured data first (many sites use this)
+        json_ld_data = None
+        for script in soup.find_all('script', type='application/ld+json'):
+            try:
+                json_ld_data = json.loads(script.string)
+                print(f"📋 Found JSON-LD structured data")
+                break
+            except:
+                continue
+        
+        # Remove script and style elements first
         for script in soup(["script", "style", "noscript"]):
             script.decompose()
         
-        # Extract text content
-        page_text = ' '.join(soup.get_text().split())
+        # Extract text from key elements that typically contain car info
+        relevant_text_parts = []
         
-        # Limit text length to avoid token limits (keep first 8000 characters)
-        limited_text = page_text[:8000]
+        # Get title/heading text (important for car listings)
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'title']):
+            text = tag.get_text(strip=True)
+            if text and len(text) > 0:
+                relevant_text_parts.append(text)
         
-        # Use GPT-4o to extract car information
+        # Get all text that contains numbers (likely prices, miles, years)
+        # Look for patterns like $XX,XXX or XX,XXX miles
+        for tag in soup.find_all(['span', 'div', 'p', 'td', 'li']):
+            text = tag.get_text(strip=True)
+            # Include if it has price indicators, numbers, or car-related keywords
+            if any(indicator in text.lower() for indicator in ['$', 'price', 'miles', 'mileage', 'year', 'make', 'model', 'vin', 'odometer']):
+                if text and len(text) > 0 and len(text) < 200:  # Avoid huge blocks
+                    relevant_text_parts.append(text)
+        
+        # Get main content areas
+        for tag in soup.find_all(['main', 'article', 'section']):
+            text = tag.get_text(strip=True)
+            if text and len(text) > 100:  # Only substantial content
+                relevant_text_parts.append(text[:1000])  # Limit each section
+        
+        # Also extract from data attributes and meta tags
+        for meta in soup.find_all('meta'):
+            content = meta.get('content', '')
+            property_attr = meta.get('property', '')
+            if content and ('price' in property_attr.lower() or 'vehicle' in property_attr.lower()):
+                relevant_text_parts.append(content)
+        
+        # Get all visible text as comprehensive fallback
+        all_text = soup.get_text(separator=' ', strip=True)
+        
+        # Combine all text sources, prioritizing structured data
+        if relevant_text_parts:
+            page_text = ' '.join(relevant_text_parts)
+            # Add a sample of all text to catch anything we missed
+            if len(all_text) > len(page_text):
+                page_text += ' ' + all_text[:2000]
+            print(f"📄 Extracted {len(page_text)} characters from relevant HTML elements")
+        else:
+            # Fallback to general text extraction
+            page_text = all_text
+            print(f"📄 Using general text extraction: {len(page_text)} characters")
+        
+        # Include JSON-LD data if found
+        if json_ld_data:
+            page_text = f"Structured Data: {json.dumps(json_ld_data, indent=2)}\n\nPage Content: {page_text}"
+        
+        # Limit text length to avoid token limits (keep first 12000 characters for better extraction)
+        limited_text = page_text[:12000]
+        print(f"📄 Sending {len(limited_text)} characters to GPT-4o for extraction")
+        
+        # Log a sample of what we're sending (first 500 chars)
+        print(f"📝 Sample content (first 500 chars): {limited_text[:500]}...")
+        
+        # Step 3: Use GPT-4o to extract car information
+        print(f'🤖 Step 3: Sending HTML content to GPT-4o for data extraction...')
         extraction_prompt = f"""Extract car listing information from this web page content. Return ONLY a JSON object with the extracted data. If information is not available, use null. Make sure numbers are actual numbers, not strings.
 
 Required fields:
@@ -136,10 +346,11 @@ Return ONLY valid JSON in this exact format (no markdown, no code blocks):
             'extractedAt': datetime.now()
         }
         
-        print('Extracted data from URL:', extracted_data)
+        print(f'✅ Step 3 complete: GPT-4o extracted {len([k for k, v in extracted_data.items() if v is not None])} fields from HTML')
+        print(f'   Extracted data: {extracted_data}')
         return extracted_data
     except Exception as error:
-        print(f'Error scraping URL: {error}')
+        print(f'❌ Error in steps 2 or 3 (fetching/scraping URL): {error}')
         raise
 
 

@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from models import Thread, Message, CarListing
 from utils import (
-    extract_urls, scrape_and_extract_car_data, build_conversation_transcript,
+    build_conversation_transcript,
     extract_car_listing_data, message_contains_new_information, get_ai_response,
     send_sms, MTA_PHONE_NUMBER, MTA_API_KEY, openai_client
 )
@@ -245,20 +245,6 @@ async def sms_webhook(webhook: SMSWebhook):
         }
         Message.create(message_data)
         
-        # Check for URLs and scrape if found
-        urls = extract_urls(message_body)
-        if urls:
-            print(f"Found {len(urls)} URL(s) in message: {urls}")
-            try:
-                extracted_data = await scrape_and_extract_car_data(urls[0])
-                Thread.update_one(
-                    {"_id": thread["_id"]},
-                    {"extractedUrlData": extracted_data}
-                )
-                print(f"✅ Extracted and stored data from URL: {extracted_data}")
-            except Exception as scrape_error:
-                print(f"Error scraping URL: {scrape_error}")
-        
         # Check if conversation is already complete
         if thread.get("conversationComplete"):
             print("ℹ️  Conversation already complete, not generating response")
@@ -267,7 +253,7 @@ async def sms_webhook(webhook: SMSWebhook):
         # If waiting for dealer response, check if message has new information
         if thread.get("waitingForDealerResponse"):
             print("ℹ️  Currently waiting for dealer response, checking if message contains new information...")
-            known_data = thread.get("extractedUrlData")
+            known_data = None  # No URL extraction data available
             has_new_info = await message_contains_new_information(message_body, known_data)
             
             if not has_new_info:
@@ -293,7 +279,7 @@ async def sms_webhook(webhook: SMSWebhook):
             transcript = await build_conversation_transcript(thread_id_string, Message)
             print(f"Conversation transcript: {transcript}")
             
-            known_data = thread.get("extractedUrlData")
+            known_data = None  # No URL extraction data available
             ai_response = await get_ai_response(transcript, known_data, thread.get("waitingForDealerResponse", False))
             print(f"AI agent response: {ai_response}")
             
@@ -559,95 +545,6 @@ async def get_thread_car_listing(thread_id: str):
     except Exception as error:
         print(f"Error fetching car listing: {error}")
         raise HTTPException(status_code=500, detail="Failed to fetch car listing")
-
-
-@app.post("/api/test/create-listing")
-async def test_create_listing():
-    """Test endpoint to create a sample car listing in MongoDB"""
-    try:
-        # Create a test thread first (or use an existing one)
-        test_phone = "+19139999999"
-        test_thread = Thread.find_one({"phoneNumber": test_phone})
-        
-        if not test_thread:
-            # Create a test thread
-            thread_data = {
-                "phoneNumber": test_phone,
-                "lastMessage": "Test message for listing creation",
-                "lastMessageTime": datetime.now(),
-                "unreadCount": 0,
-                "conversationComplete": True,
-                "waitingForDealerResponse": False
-            }
-            thread_id = Thread.create(thread_data)
-            test_thread = Thread.find_by_id(thread_id)
-            print(f"✅ Created test thread: {thread_id}")
-        
-        thread_id = test_thread["_id"]
-        
-        # Create test car listing data
-        test_listing_data = {
-            "threadId": thread_id,
-            "phoneNumber": test_phone,
-            "make": "Toyota",
-            "model": "Camry",
-            "year": 2020,
-            "miles": 45000,
-            "listingPrice": 22000,
-            "tireLifeLeft": True,
-            "titleStatus": "Clean",
-            "carfaxDamageIncidents": 0,
-            "docFeeQuoted": 200,
-            "lowestPrice": 22000,
-            "conversationComplete": True,
-            "extractedAt": datetime.now()
-        }
-        
-        # Check if listing already exists
-        existing = CarListing.find_one({"threadId": thread_id})
-        if existing:
-            CarListing.update_one(
-                {"threadId": thread_id},
-                test_listing_data
-            )
-            print(f"✅ Updated test car listing for thread: {thread_id}")
-            # Serialize the data for JSON response
-            serialized_data = {**test_listing_data}
-            serialized_data["threadId"] = str(thread_id)
-            serialized_data["extractedAt"] = test_listing_data["extractedAt"].isoformat()
-            return {
-                "success": True,
-                "message": "Updated existing test listing",
-                "listing_id": str(existing.get("_id")),
-                "data": serialized_data
-            }
-        else:
-            listing_id = CarListing.create(test_listing_data)
-            print(f"✅ Created test car listing: {listing_id}")
-            print(f"   Thread ID: {thread_id}")
-            print(f"   Phone: {test_phone}")
-            print(f"   Make/Model: {test_listing_data['make']} {test_listing_data['model']}")
-            print(f"   Year: {test_listing_data['year']}")
-            print(f"   Miles: {test_listing_data['miles']:,}")
-            print(f"   Price: ${test_listing_data['listingPrice']:,}")
-            
-            # Serialize the data for JSON response
-            serialized_data = {**test_listing_data}
-            serialized_data["threadId"] = str(thread_id)
-            serialized_data["extractedAt"] = test_listing_data["extractedAt"].isoformat()
-            
-            return {
-                "success": True,
-                "message": "Created test car listing",
-                "listing_id": listing_id,
-                "data": serialized_data
-            }
-    except Exception as error:
-        import traceback
-        print(f"\n❌ ERROR creating test listing:")
-        print(f"   Error: {error}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error creating test listing: {str(error)}")
 
 
 if __name__ == "__main__":
