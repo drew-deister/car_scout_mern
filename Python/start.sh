@@ -14,7 +14,7 @@ if [ ! -f .env ]; then
 fi
 
 # Start backend server in background
-echo "Starting FastAPI backend server on port 5000..."
+echo "Starting FastAPI backend server on port 5001..."
 python3 server.py &
 BACKEND_PID=$!
 

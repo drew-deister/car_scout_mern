@@ -48,27 +48,59 @@ MTA_ALERT_EMAIL=
 
 ## Running the Application
 
-1. Start the backend server:
+### Option 1: Local Development (No Webhooks)
 ```bash
-python3 server.py
+./start.sh
 ```
 
-Or using uvicorn directly:
-```bash
-uvicorn server:app --host 0.0.0.0 --port 5001
-```
-
-2. Start the Streamlit frontend (in a new terminal):
-```bash
-streamlit run app.py
-python3 -m streamlit run app.py
-```
-
-3. or do this:    ./start.sh
-
-The application will be available at:
+This starts both the backend and frontend locally:
 - Frontend: http://localhost:8501
 - Backend API: http://localhost:5001
+
+### Option 2: With ngrok (For Webhook Access)
+To receive SMS webhooks from Mobile Text Alerts, you need to expose your server publicly:
+
+```bash
+./start-with-ngrok.sh
+```
+
+This will:
+1. Start the backend server on port 5001
+2. Start ngrok tunnel pointing to your server
+3. Display the public ngrok URL
+
+**Important Steps:**
+1. Copy the ngrok URL (e.g., `https://xxxx.ngrok.io`)
+2. Configure Mobile Text Alerts webhook to: `https://xxxx.ngrok.io/api/webhook/sms`
+3. You can view ngrok traffic at: http://localhost:4040
+
+**Note:** The ngrok URL changes each time you restart (unless you have a paid ngrok account with a static domain).
+
+### Manual Start (Three Separate Terminals)
+
+**Terminal 1 - Backend Server:**
+```bash
+cd /Users/drewdeister/Downloads/car_scout/Python
+python3 server.py
+```
+Backend will run on: http://localhost:5001
+
+**Terminal 2 - Frontend (Streamlit):**
+```bash
+cd /Users/drewdeister/Downloads/car_scout/Python
+python3 -m streamlit run app.py
+```
+Frontend will run on: http://localhost:8501
+
+**Terminal 3 - ngrok Tunnel (for webhooks):**
+```bash
+ngrok http 5001
+```
+- Copy the ngrok URL (e.g., `https://xxxx.ngrok.io`)
+- Configure Mobile Text Alerts webhook to: `https://xxxx.ngrok.io/api/webhook/sms`
+- View ngrok traffic at: http://localhost:4040
+
+**To stop:** Press `Ctrl+C` in each terminal
 
 ## API Endpoints
 

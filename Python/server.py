@@ -1,11 +1,13 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import os
 import asyncio
 import random
 import re
+import json
 from datetime import datetime
 from bson import ObjectId
 from dotenv import load_dotenv
@@ -30,6 +32,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    if request.url.path == "/api/webhook/sms":
+        print(f"\n🌐 INCOMING REQUEST: {request.method} {request.url.path}")
+        print(f"   Client: {request.client.host if request.client else 'unknown'}")
+        print(f"   Headers: {dict(request.headers)}")
+        try:
+            body_bytes = await request.body()
+            if body_bytes:
+                body_str = body_bytes.decode('utf-8')
+                print(f"   Body: {body_str}")
+                # Recreate the request body for downstream processing
+                async def receive():
+                    return {"type": "http.request", "body": body_bytes}
+                request._receive = receive
+        except Exception as e:
+            print(f"   Error reading body: {e}")
+    
+    response = await call_next(request)
+    return response
+
 # Track pending responses by thread ID
 pending_responses = {}
 
@@ -46,6 +70,13 @@ class SMSWebhook(BaseModel):
 @app.get("/api")
 async def root():
     return {"message": "Car Scout API is running"}
+
+
+@app.get("/api/webhook/test")
+async def webhook_test():
+    """Test endpoint to verify webhook URL is reachable"""
+    print("\n🔔 WEBHOOK TEST ENDPOINT HIT - Webhook URL is reachable!")
+    return {"message": "Webhook endpoint is reachable", "status": "ok"}
 
 
 @app.get("/api/test-db")
@@ -131,11 +162,23 @@ async def register_webhook(webhook_data: Dict[str, Any]):
 @app.post("/api/webhook/sms")
 async def sms_webhook(webhook: SMSWebhook):
     try:
+        print(f"\n{'='*60}")
+        print(f"📨 INCOMING WEBHOOK RECEIVED")
+        print(f"{'='*60}")
+        print(f"From: {webhook.fromNumber}")
+        print(f"To: {webhook.toNumber}")
+        print(f"Message: {webhook.message}")
+        print(f"Timestamp: {webhook.timestamp}")
+        print(f"Reply ID: {webhook.replyId}")
+        print(f"Tags: {webhook.tags}")
+        print(f"{'='*60}\n")
+        
         sender_phone = webhook.fromNumber
         recipient_phone = webhook.toNumber or "unknown"
         message_body = webhook.message
         
         if not sender_phone or not message_body:
+            print("❌ ERROR: Missing required fields (sender_phone or message_body)")
             raise HTTPException(status_code=400, detail="Missing required fields")
         
         # Filter out Mobile Text Alerts automatic opt-in messages
@@ -342,7 +385,7 @@ async def sms_webhook(webhook: SMSWebhook):
                     print(f"Error extracting/saving car listing data: {extract_error}")
             else:
                 # Schedule delayed response
-                delay_ms = random.randint(300000, 330000)  # 5-5.5 minutes
+                delay_ms = random.randint(30000, 60000)  
                 print(f"⏱️  Scheduling response to be sent in {delay_ms // 1000} seconds")
                 
                 async def send_delayed_response():
@@ -393,7 +436,12 @@ async def sms_webhook(webhook: SMSWebhook):
         
         return {"success": True, "message": "Message processed"}
     except Exception as error:
-        print(f"Error processing incoming SMS: {error}")
+        import traceback
+        print(f"\n❌ ERROR processing incoming SMS:")
+        print(f"   Error: {error}")
+        print(f"   Type: {type(error).__name__}")
+        print(f"   Traceback:")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error processing message")
 
 
@@ -513,8 +561,107 @@ async def get_thread_car_listing(thread_id: str):
         raise HTTPException(status_code=500, detail="Failed to fetch car listing")
 
 
+@app.post("/api/test/create-listing")
+async def test_create_listing():
+    """Test endpoint to create a sample car listing in MongoDB"""
+    try:
+        # Create a test thread first (or use an existing one)
+        test_phone = "+19139999999"
+        test_thread = Thread.find_one({"phoneNumber": test_phone})
+        
+        if not test_thread:
+            # Create a test thread
+            thread_data = {
+                "phoneNumber": test_phone,
+                "lastMessage": "Test message for listing creation",
+                "lastMessageTime": datetime.now(),
+                "unreadCount": 0,
+                "conversationComplete": True,
+                "waitingForDealerResponse": False
+            }
+            thread_id = Thread.create(thread_data)
+            test_thread = Thread.find_by_id(thread_id)
+            print(f"✅ Created test thread: {thread_id}")
+        
+        thread_id = test_thread["_id"]
+        
+        # Create test car listing data
+        test_listing_data = {
+            "threadId": thread_id,
+            "phoneNumber": test_phone,
+            "make": "Toyota",
+            "model": "Camry",
+            "year": 2020,
+            "miles": 45000,
+            "listingPrice": 22000,
+            "tireLifeLeft": True,
+            "titleStatus": "Clean",
+            "carfaxDamageIncidents": 0,
+            "docFeeQuoted": 200,
+            "lowestPrice": 22000,
+            "conversationComplete": True,
+            "extractedAt": datetime.now()
+        }
+        
+        # Check if listing already exists
+        existing = CarListing.find_one({"threadId": thread_id})
+        if existing:
+            CarListing.update_one(
+                {"threadId": thread_id},
+                test_listing_data
+            )
+            print(f"✅ Updated test car listing for thread: {thread_id}")
+            # Serialize the data for JSON response
+            serialized_data = {**test_listing_data}
+            serialized_data["threadId"] = str(thread_id)
+            serialized_data["extractedAt"] = test_listing_data["extractedAt"].isoformat()
+            return {
+                "success": True,
+                "message": "Updated existing test listing",
+                "listing_id": str(existing.get("_id")),
+                "data": serialized_data
+            }
+        else:
+            listing_id = CarListing.create(test_listing_data)
+            print(f"✅ Created test car listing: {listing_id}")
+            print(f"   Thread ID: {thread_id}")
+            print(f"   Phone: {test_phone}")
+            print(f"   Make/Model: {test_listing_data['make']} {test_listing_data['model']}")
+            print(f"   Year: {test_listing_data['year']}")
+            print(f"   Miles: {test_listing_data['miles']:,}")
+            print(f"   Price: ${test_listing_data['listingPrice']:,}")
+            
+            # Serialize the data for JSON response
+            serialized_data = {**test_listing_data}
+            serialized_data["threadId"] = str(thread_id)
+            serialized_data["extractedAt"] = test_listing_data["extractedAt"].isoformat()
+            
+            return {
+                "success": True,
+                "message": "Created test car listing",
+                "listing_id": listing_id,
+                "data": serialized_data
+            }
+    except Exception as error:
+        import traceback
+        print(f"\n❌ ERROR creating test listing:")
+        print(f"   Error: {error}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error creating test listing: {str(error)}")
+
+
 if __name__ == "__main__":
     import uvicorn
+    import logging
+    
+    # Reduce uvicorn access log verbosity
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    
     port = int(os.getenv("PORT", 5001))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=port,
+        log_level="warning"  # Only show warnings and errors, not INFO
+    )
 
