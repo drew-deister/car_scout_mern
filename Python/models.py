@@ -35,6 +35,7 @@ db = client['test']
 threads_collection = db.threads
 messages_collection = db.messages
 car_listings_collection = db.carlistings
+visits_collection = db.visits
 
 # Create indexes
 threads_collection.create_index([("phoneNumber", 1)])
@@ -44,6 +45,9 @@ messages_collection.create_index([("timestamp", 1)])
 car_listings_collection.create_index([("threadId", 1)], unique=True)
 car_listings_collection.create_index([("phoneNumber", 1)])
 car_listings_collection.create_index([("conversationComplete", 1)])
+visits_collection.create_index([("threadId", 1)])
+visits_collection.create_index([("scheduledTime", 1)])
+visits_collection.create_index([("dealerPhoneNumber", 1)])
 
 
 class Thread:
@@ -110,4 +114,44 @@ class CarListing:
     @staticmethod
     def update_one(query: Dict[str, Any], update: Dict[str, Any]):
         return car_listings_collection.update_one(query, {"$set": update})
+    
+    @staticmethod
+    def find_by_id(car_listing_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            return car_listings_collection.find_one({"_id": ObjectId(car_listing_id)})
+        except:
+            return None
+
+
+class Visit:
+    @staticmethod
+    def find_one(query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        return visits_collection.find_one(query)
+    
+    @staticmethod
+    def find(query: Dict[str, Any] = None, sort: list = None) -> list:
+        cursor = visits_collection.find(query or {})
+        if sort:
+            cursor = cursor.sort(sort)
+        return list(cursor)
+    
+    @staticmethod
+    def create(data: Dict[str, Any]) -> str:
+        result = visits_collection.insert_one(data)
+        return str(result.inserted_id)
+    
+    @staticmethod
+    def update_one(query: Dict[str, Any], update: Dict[str, Any]):
+        return visits_collection.update_one(query, {"$set": update})
+    
+    @staticmethod
+    def delete_one(query: Dict[str, Any]):
+        return visits_collection.delete_one(query)
+    
+    @staticmethod
+    def find_by_id(visit_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            return visits_collection.find_one({"_id": ObjectId(visit_id)})
+        except:
+            return None
 

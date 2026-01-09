@@ -12,11 +12,12 @@ from datetime import datetime
 from bson import ObjectId
 from dotenv import load_dotenv
 
-from models import Thread, Message, CarListing
+from models import Thread, Message, CarListing, Visit
 from utils import (
     build_conversation_transcript,
     extract_car_listing_data, message_contains_new_information, get_ai_response,
-    send_sms, MTA_PHONE_NUMBER, MTA_API_KEY, openai_client
+    send_sms, MTA_PHONE_NUMBER, MTA_API_KEY, openai_client,
+    check_if_message_about_visit_scheduling, process_visit_scheduling
 )
 
 load_dotenv()
@@ -274,14 +275,29 @@ async def sms_webhook(webhook: SMSWebhook):
             del pending_responses[thread_id_string]
             print("⚠️  Cancelled pending response due to new message")
         
+        # Check if message is about visit scheduling
+        is_visit_scheduling = check_if_message_about_visit_scheduling(message_body)
+        
         # Generate AI agent response
         try:
             transcript = await build_conversation_transcript(thread_id_string, Message)
             print(f"Conversation transcript: {transcript}")
             
+            # If message is about visit scheduling, process it first
+            scheduling_response = None
+            if is_visit_scheduling:
+                print("📅 Message is about visit scheduling, processing with scheduling agent...")
+                scheduling_response = await process_visit_scheduling(transcript, thread_id_string, sender_phone, message_body)
+                if scheduling_response:
+                    print(f"Scheduling agent response: {scheduling_response}")
+            
             known_data = None  # No URL extraction data available
             ai_response = await get_ai_response(transcript, known_data, thread.get("waitingForDealerResponse", False))
             print(f"AI agent response: {ai_response}")
+            
+            # If scheduling agent provided a response, use it instead of main agent response
+            if scheduling_response:
+                ai_response = scheduling_response
             
             # Check if we should enter waiting state
             if "# WAITING #" in ai_response:
@@ -545,6 +561,93 @@ async def get_thread_car_listing(thread_id: str):
     except Exception as error:
         print(f"Error fetching car listing: {error}")
         raise HTTPException(status_code=500, detail="Failed to fetch car listing")
+
+
+@app.get("/api/visits")
+async def get_visits(start_date: Optional[str] = None, end_date: Optional[str] = None):
+    """Get visits, optionally filtered by date range"""
+    try:
+        query = {}
+        
+        if start_date or end_date:
+            from dateutil import parser as date_parser
+            from dateutil.tz import gettz
+            ct_tz = gettz('America/Chicago')
+            
+            date_range = {}
+            if start_date:
+                start = date_parser.parse(start_date)
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=ct_tz)
+                date_range["$gte"] = start
+            if end_date:
+                end = date_parser.parse(end_date)
+                if end.tzinfo is None:
+                    end = end.replace(tzinfo=ct_tz)
+                date_range["$lte"] = end
+            
+            if date_range:
+                query["scheduledTime"] = date_range
+        
+        # Exclude cancelled visits by default
+        query["status"] = {"$ne": "cancelled"}
+        
+        visits = Visit.find(query, sort=[("scheduledTime", 1)])
+        
+        # Serialize and populate related data
+        result = []
+        for visit in visits:
+            visit_serialized = serialize_document(visit)
+            
+            # Populate car listing if available
+            if visit.get("carListingId"):
+                car_listing = CarListing.find_by_id(str(visit["carListingId"]))
+                if car_listing:
+                    visit_serialized["carListing"] = serialize_document(car_listing)
+            
+            # Populate thread if available
+            if visit.get("threadId"):
+                thread = Thread.find_by_id(str(visit["threadId"]))
+                if thread:
+                    visit_serialized["thread"] = serialize_document(thread)
+            
+            result.append(visit_serialized)
+        
+        return result
+    except Exception as error:
+        print(f"Error fetching visits: {error}")
+        raise HTTPException(status_code=500, detail="Failed to fetch visits")
+
+
+@app.get("/api/visits/{visit_id}")
+async def get_visit(visit_id: str):
+    """Get a specific visit by ID"""
+    try:
+        visit = Visit.find_by_id(visit_id)
+        
+        if not visit:
+            raise HTTPException(status_code=404, detail="Visit not found")
+        
+        visit_serialized = serialize_document(visit)
+        
+        # Populate car listing if available
+        if visit.get("carListingId"):
+            car_listing = CarListing.find_by_id(str(visit["carListingId"]))
+            if car_listing:
+                visit_serialized["carListing"] = serialize_document(car_listing)
+        
+        # Populate thread if available
+        if visit.get("threadId"):
+            thread = Thread.find_by_id(str(visit["threadId"]))
+            if thread:
+                visit_serialized["thread"] = serialize_document(thread)
+        
+        return visit_serialized
+    except HTTPException:
+        raise
+    except Exception as error:
+        print(f"Error fetching visit: {error}")
+        raise HTTPException(status_code=500, detail="Failed to fetch visit")
 
 
 if __name__ == "__main__":

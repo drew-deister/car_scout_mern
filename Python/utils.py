@@ -8,6 +8,8 @@ from openai import OpenAI
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from dateutil import parser as date_parser
+from dateutil.tz import gettz
 
 # Playwright for JavaScript-rendered content
 try:
@@ -732,4 +734,412 @@ async def send_sms(to: str, message: str, retries: int = 3) -> Dict[str, Any]:
             if attempt == 1:
                 print(f'Request payload was: {payload}')
             raise
+
+
+# ==================== VISIT SCHEDULING AGENT ====================
+
+def check_if_message_about_visit_scheduling(message: str) -> bool:
+    """Check if dealer message is about scheduling, modifying, or canceling a visit"""
+    if not openai_client:
+        # Fallback to keyword matching
+        visit_keywords = [
+            'visit', 'appointment', 'schedule', 'come in', 'come by', 'stop by',
+            'when can you', 'what time', 'available', 'availability', 'cancel',
+            'reschedule', 'change time', 'change date', 'meet', 'see the car',
+            'test drive', 'view', 'inspect'
+        ]
+        message_lower = message.lower()
+        return any(keyword in message_lower for keyword in visit_keywords)
+    
+    try:
+        prompt = f"""Does this dealer message ask about scheduling a visit, appointment, or meeting to see the car? This includes:
+- Asking when the buyer can come in/visit
+- Suggesting a time to meet
+- Asking about availability
+- Requesting to schedule an appointment
+- Asking to reschedule or cancel a visit
+- Asking about test driving or viewing the car
+
+Message: "{message}"
+
+Respond with ONLY "YES" if it's about visit scheduling, or "NO" if it's not."""
+        
+        completion = openai_client.chat.completions.create(
+            model='gpt-4o',
+            messages=[
+                {'role': 'system', 'content': 'You are a helpful assistant that determines if a message is about scheduling visits or appointments.'},
+                {'role': 'user', 'content': prompt}
+            ],
+            temperature=0.3,
+            max_tokens=10
+        )
+        
+        response = completion.choices[0].message.content.strip().upper()
+        return response == 'YES'
+    except Exception as error:
+        print(f'Error checking if message is about visit scheduling: {error}')
+        # On error, use keyword fallback
+        visit_keywords = [
+            'visit', 'appointment', 'schedule', 'come in', 'come by', 'stop by',
+            'when can you', 'what time', 'available', 'availability', 'cancel',
+            'reschedule', 'change time', 'change date', 'meet', 'see the car',
+            'test drive', 'view', 'inspect'
+        ]
+        message_lower = message.lower()
+        return any(keyword in message_lower for keyword in visit_keywords)
+
+
+def get_visit_availability(start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
+    """Get available time slots for visits between start_date and end_date"""
+    from models import Visit
+    from bson import ObjectId
+    
+    # Find all visits in the date range
+    visits = Visit.find({
+        "scheduledTime": {
+            "$gte": start_date,
+            "$lte": end_date
+        },
+        "status": {"$ne": "cancelled"}
+    })
+    
+    # Return existing visits (for context)
+    return [
+        {
+            "visitId": str(v["_id"]),
+            "scheduledTime": v["scheduledTime"].isoformat() if isinstance(v["scheduledTime"], datetime) else v["scheduledTime"],
+            "dealerPhoneNumber": v.get("dealerPhoneNumber"),
+            "status": v.get("status", "scheduled")
+        }
+        for v in visits
+    ]
+
+
+def create_visit(thread_id: str, scheduled_time: datetime, dealer_phone_number: str, car_listing_id: Optional[str] = None, notes: Optional[str] = None) -> str:
+    """Create a new visit"""
+    from models import Visit
+    
+    visit_data = {
+        "threadId": ObjectId(thread_id) if isinstance(thread_id, str) else thread_id,
+        "scheduledTime": scheduled_time,
+        "dealerPhoneNumber": dealer_phone_number,
+        "status": "scheduled",
+        "createdAt": datetime.now(),
+        "updatedAt": datetime.now()
+    }
+    
+    if car_listing_id:
+        visit_data["carListingId"] = ObjectId(car_listing_id) if isinstance(car_listing_id, str) else car_listing_id
+    
+    if notes:
+        visit_data["notes"] = notes
+    
+    visit_id = Visit.create(visit_data)
+    print(f"✅ Created visit {visit_id} for thread {thread_id} at {scheduled_time}")
+    return visit_id
+
+
+def modify_visit(visit_id: str, scheduled_time: Optional[datetime] = None, notes: Optional[str] = None, status: Optional[str] = None) -> bool:
+    """Modify an existing visit"""
+    from models import Visit
+    
+    update_data = {"updatedAt": datetime.now()}
+    
+    if scheduled_time:
+        update_data["scheduledTime"] = scheduled_time
+    
+    if notes is not None:
+        update_data["notes"] = notes
+    
+    if status:
+        update_data["status"] = status
+    
+    result = Visit.update_one({"_id": ObjectId(visit_id)}, update_data)
+    print(f"✅ Modified visit {visit_id}")
+    return result.modified_count > 0
+
+
+def delete_visit(visit_id: str) -> bool:
+    """Delete a visit"""
+    from models import Visit
+    
+    result = Visit.delete_one({"_id": ObjectId(visit_id)})
+    print(f"✅ Deleted visit {visit_id}")
+    return result.deleted_count > 0
+
+
+async def get_scheduling_agent_response(conversation_transcript: str, thread_id: str, dealer_phone_number: str) -> Optional[str]:
+    """Get scheduling agent response for visit-related messages"""
+    if not openai_client:
+        return None
+    
+    from models import Visit, CarListing, Thread
+    from bson import ObjectId
+    
+    # Get existing visits for this thread
+    existing_visits = Visit.find({"threadId": ObjectId(thread_id)})
+    visits_info = []
+    for visit in existing_visits:
+        visits_info.append({
+            "visitId": str(visit["_id"]),
+            "scheduledTime": visit["scheduledTime"].isoformat() if isinstance(visit["scheduledTime"], datetime) else str(visit["scheduledTime"]),
+            "status": visit.get("status", "scheduled"),
+            "notes": visit.get("notes", "")
+        })
+    
+    # Get car listing info if available
+    car_listing = CarListing.find_one({"threadId": ObjectId(thread_id)})
+    car_info = ""
+    if car_listing:
+        car_info = f"Car: {car_listing.get('year', '')} {car_listing.get('make', '')} {car_listing.get('model', '')}"
+    
+    # Get thread info
+    thread = Thread.find_by_id(thread_id)
+    
+    system_prompt = f"""You are a scheduling assistant for car dealership visits. Your job is to help schedule, modify, or cancel visits to see cars at dealerships.
+
+You have access to the following tools:
+1. get_visit_availability(start_date, end_date) - Get existing visits in a date range
+2. create_visit(thread_id, scheduled_time, dealer_phone_number, car_listing_id, notes) - Create a new visit
+3. modify_visit(visit_id, scheduled_time, notes, status) - Modify an existing visit
+4. delete_visit(visit_id) - Delete/cancel a visit
+
+Current context:
+- Thread ID: {thread_id}
+- Dealer Phone: {dealer_phone_number}
+- {car_info}
+- Existing visits: {json.dumps(visits_info, indent=2) if visits_info else 'None'}
+
+IMPORTANT RULES:
+1. All times should be in Central Time (CT)
+2. Only create/modify visits when you have ALL necessary information:
+   - For creating: You need a specific date AND time
+   - For modifying: You need the visit ID and the new information
+3. If the dealer asks about availability but doesn't suggest a specific time, ask them what times work for them
+4. If the dealer suggests a time, confirm it and create the visit
+5. If the dealer wants to reschedule, use modify_visit
+6. If the dealer wants to cancel, use delete_visit or set status to "cancelled"
+7. Be friendly and professional
+8. Always confirm the date and time before creating a visit
+9. If you don't have enough information, ask for it before taking action
+
+When you want to use a tool, respond with:
+TOOL_CALL: tool_name(arg1=value1, arg2=value2)
+
+After using a tool, you'll get the result. Then provide a natural response to the dealer.
+
+If you need to ask for more information, just respond naturally without using tools."""
+    
+    user_prompt = f"""Here is the conversation transcript:
+
+{conversation_transcript}
+
+What should you do? If you need to use a tool, use the TOOL_CALL format. Otherwise, respond naturally to the dealer."""
+    
+    try:
+        completion = openai_client.chat.completions.create(
+            model='gpt-4o',
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=300
+        )
+        
+        response = completion.choices[0].message.content.strip()
+        
+        # Check if response contains a tool call
+        if "TOOL_CALL:" in response:
+            # Extract tool call
+            tool_call_line = [line for line in response.split('\n') if 'TOOL_CALL:' in line][0]
+            tool_call = tool_call_line.replace('TOOL_CALL:', '').strip()
+            
+            # Parse and execute tool call
+            try:
+                # Simple parsing - extract function name and arguments
+                if 'get_visit_availability' in tool_call:
+                    # This would need date parsing - for now, skip
+                    pass
+                elif 'create_visit' in tool_call:
+                    # Extract scheduled_time from tool_call
+                    # This is simplified - in production, you'd want better parsing
+                    import re
+                    from dateutil import parser as date_parser
+                    
+                    # Try to extract datetime from the response or conversation
+                    # For now, we'll need to parse the conversation for date/time
+                    time_match = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', conversation_transcript)
+                    if time_match:
+                        # This is a simplified version - you'd want better date parsing
+                        pass
+                elif 'modify_visit' in tool_call:
+                    # Extract visit_id and new info
+                    pass
+                elif 'delete_visit' in tool_call:
+                    # Extract visit_id
+                    pass
+            except Exception as tool_error:
+                print(f"Error executing tool call: {tool_error}")
+        
+        # For now, return the response (the agent will handle tool calls in a more sophisticated way)
+        # We'll implement a simpler version that extracts date/time from the conversation
+        return response
+    except Exception as error:
+        print(f'Error getting scheduling agent response: {error}')
+        return None
+
+
+async def process_visit_scheduling(conversation_transcript: str, thread_id: str, dealer_phone_number: str, latest_message: str) -> Optional[str]:
+    """Process visit scheduling - extract date/time and create/modify visits"""
+    if not openai_client:
+        return None
+    
+    from models import Visit, CarListing
+    from bson import ObjectId
+    import re
+    
+    # Central Time timezone
+    ct_tz = gettz('America/Chicago')
+    
+    try:
+        # Use GPT to extract visit scheduling information
+        extraction_prompt = f"""Analyze this conversation and the latest dealer message to determine if a visit should be scheduled, modified, or cancelled.
+
+Latest dealer message: "{latest_message}"
+
+Full conversation:
+{conversation_transcript}
+
+If the dealer is asking to schedule a visit or has suggested a specific date and time, extract:
+- action: "create", "modify", "cancel", or "none"
+- date: The date (format: YYYY-MM-DD)
+- time: The time (format: HH:MM in 24-hour format, Central Time)
+- visit_id: If modifying/cancelling, the visit ID (if mentioned)
+
+If action is "create" or "modify", you MUST have both date and time. If you don't have both, set action to "none".
+
+Return ONLY valid JSON:
+{{
+  "action": "create|modify|cancel|none",
+  "date": "YYYY-MM-DD or null",
+  "time": "HH:MM or null",
+  "visit_id": "visit_id or null",
+  "notes": "any additional notes or null"
+}}"""
+        
+        completion = openai_client.chat.completions.create(
+            model='gpt-4o',
+            messages=[
+                {'role': 'system', 'content': 'You are a data extraction assistant. Extract visit scheduling information from conversations.'},
+                {'role': 'user', 'content': extraction_prompt}
+            ],
+            temperature=0.3,
+            response_format={'type': 'json_object'}
+        )
+        
+        response_text = completion.choices[0].message.content.strip()
+        data = json.loads(response_text)
+        
+        action = data.get('action', 'none')
+        
+        if action == 'none':
+            # Ask for more information
+            return "What date and time would work best for you?"
+        
+        if action == 'cancel':
+            visit_id = data.get('visit_id')
+            if visit_id:
+                # Find visit by ID or by thread
+                visit = None
+                if visit_id:
+                    visit = Visit.find_by_id(visit_id)
+                if not visit:
+                    # Find most recent visit for this thread
+                    visits = Visit.find({"threadId": ObjectId(thread_id)}, sort=[("scheduledTime", -1)])
+                    if visits:
+                        visit = visits[0]
+                
+                if visit:
+                    modify_visit(str(visit["_id"]), status="cancelled")
+                    return "I've cancelled the visit. Let me know if you'd like to reschedule."
+                else:
+                    return "I couldn't find a visit to cancel. Could you clarify which visit you'd like to cancel?"
+            else:
+                # Find most recent visit
+                visits = Visit.find({"threadId": ObjectId(thread_id)}, sort=[("scheduledTime", -1)])
+                if visits:
+                    modify_visit(str(visits[0]["_id"]), status="cancelled")
+                    return "I've cancelled the visit. Let me know if you'd like to reschedule."
+                else:
+                    return "I couldn't find a visit to cancel."
+        
+        if action == 'modify':
+            visit_id = data.get('visit_id')
+            date_str = data.get('date')
+            time_str = data.get('time')
+            
+            # Find visit
+            visit = None
+            if visit_id:
+                visit = Visit.find_by_id(visit_id)
+            if not visit:
+                visits = Visit.find({"threadId": ObjectId(thread_id)}, sort=[("scheduledTime", -1)])
+                if visits:
+                    visit = visits[0]
+            
+            if not visit:
+                return "I couldn't find a visit to modify. Would you like to schedule a new visit?"
+            
+            if date_str and time_str:
+                try:
+                    # Parse date and time, set to Central Time
+                    datetime_str = f"{date_str} {time_str}"
+                    scheduled_time = date_parser.parse(datetime_str)
+                    # Assume it's Central Time if no timezone specified
+                    if scheduled_time.tzinfo is None:
+                        scheduled_time = scheduled_time.replace(tzinfo=ct_tz)
+                    else:
+                        scheduled_time = scheduled_time.astimezone(ct_tz)
+                    
+                    modify_visit(str(visit["_id"]), scheduled_time=scheduled_time, notes=data.get('notes'))
+                    return f"I've updated the visit to {scheduled_time.strftime('%A, %B %d at %I:%M %p')} Central Time. See you then!"
+                except Exception as e:
+                    print(f"Error parsing date/time: {e}")
+                    return "I had trouble understanding the date and time. Could you provide it in a clearer format?"
+            else:
+                return "I need both a date and time to reschedule. What date and time would work better?"
+        
+        if action == 'create':
+            date_str = data.get('date')
+            time_str = data.get('time')
+            
+            if not date_str or not time_str:
+                return "What date and time would work best for you?"
+            
+            try:
+                # Parse date and time, set to Central Time
+                datetime_str = f"{date_str} {time_str}"
+                scheduled_time = date_parser.parse(datetime_str)
+                # Assume it's Central Time if no timezone specified
+                if scheduled_time.tzinfo is None:
+                    scheduled_time = scheduled_time.replace(tzinfo=ct_tz)
+                else:
+                    scheduled_time = scheduled_time.astimezone(ct_tz)
+                
+                # Get car listing if available
+                car_listing = CarListing.find_one({"threadId": ObjectId(thread_id)})
+                car_listing_id = str(car_listing["_id"]) if car_listing else None
+                
+                visit_id = create_visit(thread_id, scheduled_time, dealer_phone_number, car_listing_id, data.get('notes'))
+                
+                return f"Perfect! I've scheduled a visit for {scheduled_time.strftime('%A, %B %d at %I:%M %p')} Central Time. Looking forward to seeing you then!"
+            except Exception as e:
+                print(f"Error creating visit: {e}")
+                return "I had trouble understanding the date and time. Could you provide it in a clearer format? For example: 'Monday at 2pm' or '12/15/2024 at 3:30pm'"
+        
+        return None
+    except Exception as error:
+        print(f'Error processing visit scheduling: {error}')
+        return None
 
