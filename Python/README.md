@@ -144,3 +144,10 @@ The application uses the same environment variables as the MERN version:
 - All credentials and configuration should match the MERN folder's `.env` file
 - The Streamlit app auto-refreshes can be enabled/disabled in `app.py`
 
+Todo:
+- upload to GitHub and make running easier
+- clean up folder
+- understand code better
+- update readme
+- it should not trigger scheduler until negotiated 
+- it should check avail and propose times

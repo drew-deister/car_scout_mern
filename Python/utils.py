@@ -2,7 +2,7 @@ import re
 import os
 import json
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from openai import OpenAI
 import requests
@@ -818,6 +818,7 @@ def get_visit_availability(start_date: datetime, end_date: datetime) -> List[Dic
 def create_visit(thread_id: str, scheduled_time: datetime, dealer_phone_number: str, car_listing_id: Optional[str] = None, notes: Optional[str] = None) -> str:
     """Create a new visit"""
     from models import Visit
+    from bson import ObjectId
     
     visit_data = {
         "threadId": ObjectId(thread_id) if isinstance(thread_id, str) else thread_id,
@@ -1002,9 +1003,16 @@ async def process_visit_scheduling(conversation_transcript: str, thread_id: str,
     # Central Time timezone
     ct_tz = gettz('America/Chicago')
     
+    # Get today's date in Central Time for reference
+    now_ct = datetime.now(ct_tz)
+    today_str = now_ct.strftime('%Y-%m-%d')
+    today_day_name = now_ct.strftime('%A')
+    
     try:
         # Use GPT to extract visit scheduling information
         extraction_prompt = f"""Analyze this conversation and the latest dealer message to determine if a visit should be scheduled, modified, or cancelled.
+
+IMPORTANT: Today is {today_day_name}, {today_str} (Central Time). When the dealer mentions a day name like "Saturday" or "Monday", interpret it relative to today's date.
 
 Latest dealer message: "{latest_message}"
 
@@ -1013,7 +1021,7 @@ Full conversation:
 
 If the dealer is asking to schedule a visit or has suggested a specific date and time, extract:
 - action: "create", "modify", "cancel", or "none"
-- date: The date (format: YYYY-MM-DD)
+- date: The date (format: YYYY-MM-DD). For relative dates like "Saturday", calculate the actual date based on today ({today_str}).
 - time: The time (format: HH:MM in 24-hour format, Central Time)
 - visit_id: If modifying/cancelling, the visit ID (if mentioned)
 
@@ -1094,13 +1102,19 @@ Return ONLY valid JSON:
             if date_str and time_str:
                 try:
                     # Parse date and time, set to Central Time
+                    # Use today's date as default for relative date parsing
                     datetime_str = f"{date_str} {time_str}"
-                    scheduled_time = date_parser.parse(datetime_str)
+                    scheduled_time = date_parser.parse(datetime_str, default=now_ct)
                     # Assume it's Central Time if no timezone specified
                     if scheduled_time.tzinfo is None:
                         scheduled_time = scheduled_time.replace(tzinfo=ct_tz)
                     else:
                         scheduled_time = scheduled_time.astimezone(ct_tz)
+                    
+                    # Validate that the scheduled time is not in the past
+                    if scheduled_time < now_ct:
+                        print(f"⚠️  Parsed date {scheduled_time} is in the past (today is {now_ct}). Rejecting.")
+                        return f"I had trouble understanding the date. The date you mentioned seems to be in the past. Could you provide a future date and time?"
                     
                     modify_visit(str(visit["_id"]), scheduled_time=scheduled_time, notes=data.get('notes'))
                     return f"I've updated the visit to {scheduled_time.strftime('%A, %B %d at %I:%M %p')} Central Time. See you then!"
@@ -1119,13 +1133,19 @@ Return ONLY valid JSON:
             
             try:
                 # Parse date and time, set to Central Time
+                # Use today's date as default for relative date parsing
                 datetime_str = f"{date_str} {time_str}"
-                scheduled_time = date_parser.parse(datetime_str)
+                scheduled_time = date_parser.parse(datetime_str, default=now_ct)
                 # Assume it's Central Time if no timezone specified
                 if scheduled_time.tzinfo is None:
                     scheduled_time = scheduled_time.replace(tzinfo=ct_tz)
                 else:
                     scheduled_time = scheduled_time.astimezone(ct_tz)
+                
+                # Validate that the scheduled time is not in the past
+                if scheduled_time < now_ct:
+                    print(f"⚠️  Parsed date {scheduled_time} is in the past (today is {now_ct}). Rejecting.")
+                    return f"I had trouble understanding the date. The date you mentioned seems to be in the past. Could you provide a future date and time? For example: 'This Saturday at 4pm' or 'January 10th at 4pm'"
                 
                 # Get car listing if available
                 car_listing = CarListing.find_one({"threadId": ObjectId(thread_id)})
@@ -1136,7 +1156,9 @@ Return ONLY valid JSON:
                 return f"Perfect! I've scheduled a visit for {scheduled_time.strftime('%A, %B %d at %I:%M %p')} Central Time. Looking forward to seeing you then!"
             except Exception as e:
                 print(f"Error creating visit: {e}")
-                return "I had trouble understanding the date and time. Could you provide it in a clearer format? For example: 'Monday at 2pm' or '12/15/2024 at 3:30pm'"
+                # Use a relative date example based on today
+                example_date = (now_ct + timedelta(days=7)).strftime('%B %d')
+                return f"I had trouble understanding the date and time. Could you provide it in a clearer format? For example: 'Monday at 2pm' or '{example_date} at 3:30pm'"
         
         return None
     except Exception as error:

@@ -291,13 +291,13 @@ async def sms_webhook(webhook: SMSWebhook):
                 if scheduling_response:
                     print(f"Scheduling agent response: {scheduling_response}")
             
-            known_data = None  # No URL extraction data available
-            ai_response = await get_ai_response(transcript, known_data, thread.get("waitingForDealerResponse", False))
-            print(f"AI agent response: {ai_response}")
-            
-            # If scheduling agent provided a response, use it instead of main agent response
+            # Only call main AI agent if scheduling agent didn't handle the message
             if scheduling_response:
                 ai_response = scheduling_response
+            else:
+                known_data = None  # No URL extraction data available
+                ai_response = await get_ai_response(transcript, known_data, thread.get("waitingForDealerResponse", False))
+                print(f"AI agent response: {ai_response}")
             
             # Check if we should enter waiting state
             if "# WAITING #" in ai_response:
@@ -387,7 +387,7 @@ async def sms_webhook(webhook: SMSWebhook):
                     print(f"Error extracting/saving car listing data: {extract_error}")
             else:
                 # Schedule delayed response
-                delay_ms = random.randint(30000, 60000)  
+                delay_ms = 0 # random.randint(30000, 60000)  
                 print(f"⏱️  Scheduling response to be sent in {delay_ms // 1000} seconds")
                 
                 async def send_delayed_response():
