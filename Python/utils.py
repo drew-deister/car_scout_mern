@@ -657,9 +657,9 @@ Guidelines:
 5. DO NOT ask for information you already have. If you already know the make, model, year, miles, or listing price, skip asking for those and move on to information you don't have.
 6. CRITICAL: If the dealer says that they will work on getting information for you, will get back to you, will update you, or similar phrases indicating they need time to gather information, you should acknowledge this. However, if the dealer ALSO asks a question in the same message, you must answer their question first, then acknowledge that you'll wait. For example, if they say "I'll discuss with my GM. Do you have a trade?", respond with something like "No trade, and I'll be financing. Thanks!" and then return '# WAITING #'. If they only say they'll get back without asking a question, respond with ONLY a simple "Thank you" or "Thanks" and then return '# WAITING #'. This tells the system to stop responding until the dealer provides actual new information.
 7. If the dealer indicates that they have sent a link to the carfax (whether in the thread or in a separate message), do not continue asking for the carfax, and just make the values for 7 and 8 'check_carfax'.
-8. CRITICAL: If the dealer asks you to come in and see the car, or suggests scheduling a visit, BEFORE you have all the information you need (items 1-12), you must deflect politely. Say something like "I'd like to ask a few more questions first" or "Let me get a bit more info before we schedule a visit" and then continue asking for the missing information. Only agree to schedule a visit AFTER you have all the information and are ready to return '# CONVO COMPLETE #'.
+8. CRITICAL: If the dealer asks you to come in and see the car, or suggests scheduling a visit, BEFORE you have all the information you need (items 1-12), you must deflect politely. Say something like "I'd like to ask a few more questions first" or "Let me get a bit more info before we schedule a visit" and then continue asking for the missing information. Only agree to schedule a visit AFTER you have all the information and are ready to return '#SCHEDULE#'.
 
-Return nothing but the message you would like to send the dealer (e.g., do not pre-pend "You: " or something similar to message). If the dealer says they'll get back to you, return '# WAITING #' after saying thank you. If you believe you have captured all of the information above, simply return '# CONVO COMPLETE #'. Do not return '# CONVO COMPLETE #' unless you are absolutely certain you have all of the information required."""
+Return nothing but the message you would like to send the dealer (e.g., do not pre-pend "You: " or something similar to message). If the dealer says they'll get back to you, return '# WAITING #' after saying thank you. Once you have captured ALL of the information above (items 1-12), return '#SCHEDULE#' to indicate you're ready to schedule a visit. Do not return '#SCHEDULE#' unless you are absolutely certain you have all of the information required."""
     
     user_prompt = f"""Here is the transcript of the conversation so far:
 
@@ -992,7 +992,7 @@ What should you do? If you need to use a tool, use the TOOL_CALL format. Otherwi
         return None
 
 
-async def process_visit_scheduling(conversation_transcript: str, thread_id: str, dealer_phone_number: str, latest_message: str) -> Optional[str]:
+async def process_visit_scheduling(conversation_transcript: str, thread_id: str, dealer_phone_number: str, latest_message: str) -> Optional[Dict[str, Any]]:
     """Process visit scheduling - check availability and schedule visits"""
     if not openai_client:
         return None
@@ -1096,7 +1096,8 @@ Return ONLY valid JSON:
                 # Validate it's not in the past
                 if proposed_time < now_ct:
                     # Propose a time instead
-                    return await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
+                    result = await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
+                    return result if isinstance(result, dict) else {"message": result, "visit_scheduled": False}
                 
                 # Check if the proposed time conflicts with existing visits
                 # Allow visits within 1 hour of each other (buffer time)
@@ -1118,21 +1119,37 @@ Return ONLY valid JSON:
                     alternative_time = await find_next_available_time(proposed_time, existing_visits, ct_tz, end_date)
                     if alternative_time:
                         visit_id = create_visit(thread_id, alternative_time, dealer_phone_number, car_listing_id)
-                        return f"I'm not available at that exact time, but how about {alternative_time.strftime('%A, %B %d at %I:%M %p')} Central Time? I've scheduled it for then."
+                        return {
+                            "message": f"I'm not available at that exact time, but how about {alternative_time.strftime('%A, %B %d at %I:%M %p')} Central Time? I've scheduled it for then.",
+                            "visit_scheduled": True
+                        }
                     else:
-                        return await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
+                        result = await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
+                        return result if isinstance(result, dict) else {"message": result, "visit_scheduled": False}
                 else:
                     # Time is available, create the visit
                     visit_id = create_visit(thread_id, proposed_time, dealer_phone_number, car_listing_id)
-                    return f"Perfect! I've scheduled a visit for {proposed_time.strftime('%A, %B %d at %I:%M %p')} Central Time. Looking forward to seeing you then!"
+                    return {
+                        "message": f"Perfect! I've scheduled a visit for {proposed_time.strftime('%A, %B %d at %I:%M %p')} Central Time. Looking forward to seeing you then!",
+                        "visit_scheduled": True
+                    }
             except Exception as e:
                 print(f"Error processing proposed time: {e}")
                 # Fall through to propose a time
-                return await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
+                result = await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
+                return result if isinstance(result, dict) else {"message": result, "visit_scheduled": False}
         else:
             # Dealer didn't propose a specific time, propose one
-            return await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
-        
+            result = await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
+            return result if isinstance(result, dict) else {"message": result, "visit_scheduled": False}
+    except Exception as error:
+        print(f'Error processing visit scheduling: {error}')
+        return {
+            "message": "I'm ready to schedule a visit. What date and time works for you?",
+            "visit_scheduled": False
+        }
+
+
 async def find_next_available_time(proposed_time: datetime, existing_visits: List[Dict[str, Any]], ct_tz, end_date: datetime) -> Optional[datetime]:
     """Find the next available time slot near the proposed time"""
     # Try times around the proposed time (before and after)
@@ -1169,7 +1186,7 @@ async def find_next_available_time(proposed_time: datetime, existing_visits: Lis
     return None
 
 
-async def propose_available_time(now_ct: datetime, end_date: datetime, existing_visits: List[Dict[str, Any]], ct_tz, thread_id: str, dealer_phone_number: str, car_listing_id: Optional[str]) -> str:
+async def propose_available_time(now_ct: datetime, end_date: datetime, existing_visits: List[Dict[str, Any]], ct_tz, thread_id: str, dealer_phone_number: str, car_listing_id: Optional[str]) -> Dict[str, Any]:
     """Propose an available time within the next 2 days"""
     # Preferred times: 10am, 2pm, 4pm
     preferred_hours = [10, 14, 16]
@@ -1211,7 +1228,10 @@ async def propose_available_time(now_ct: datetime, end_date: datetime, existing_
             if not conflict:
                 # Found an available time, create the visit
                 visit_id = create_visit(thread_id, candidate_time, dealer_phone_number, car_listing_id)
-                return f"How about {candidate_time.strftime('%A, %B %d at %I:%M %p')} Central Time? I've scheduled it for then."
+                return {
+                    "message": f"How about {candidate_time.strftime('%A, %B %d at %I:%M %p')} Central Time? I've scheduled it for then.",
+                    "visit_scheduled": True
+                }
         
         # Move to next day
         current_date += timedelta(days=1)
@@ -1245,13 +1265,16 @@ async def propose_available_time(now_ct: datetime, end_date: datetime, existing_
             
             if not conflict:
                 visit_id = create_visit(thread_id, candidate_time, dealer_phone_number, car_listing_id)
-                return f"How about {candidate_time.strftime('%A, %B %d at %I:%M %p')} Central Time? I've scheduled it for then."
+                return {
+                    "message": f"How about {candidate_time.strftime('%A, %B %d at %I:%M %p')} Central Time? I've scheduled it for then.",
+                    "visit_scheduled": True
+                }
         
         current_date += timedelta(days=1)
     
     # If still no time found, suggest they propose a time
-    return "I'm pretty booked up over the next couple days. What times work best for you?"
-    except Exception as error:
-        print(f'Error processing visit scheduling: {error}')
-        return None
+    return {
+        "message": "I'm pretty booked up over the next couple days. What times work best for you?",
+        "visit_scheduled": False
+    }
 

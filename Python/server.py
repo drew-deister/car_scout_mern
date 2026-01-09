@@ -318,80 +318,90 @@ async def sms_webhook(webhook: SMSWebhook):
                 
                 return {"success": True, "message": "Entered waiting state, no further responses until dealer provides new info"}
             
-            # Check if conversation is complete
-            if ai_response == "# CONVO COMPLETE #":
-                print("✅ Conversation marked as complete by AI agent")
+            # Check if agent is ready to schedule
+            if ai_response == "#SCHEDULE#":
+                print("📅 Agent has all information, calling scheduling agent...")
                 
-                # Check if the latest message is about scheduling a visit
-                is_visit_scheduling = check_if_message_about_visit_scheduling(message_body)
+                # Call scheduling agent with the latest message
+                scheduling_result = await process_visit_scheduling(transcript, thread_id_string, sender_phone, message_body)
                 
-                # If dealer wants to schedule, use scheduling agent
-                scheduling_response = None
-                if is_visit_scheduling:
-                    print("📅 Dealer wants to schedule a visit, processing with scheduling agent...")
-                    scheduling_response = await process_visit_scheduling(transcript, thread_id_string, sender_phone, message_body)
-                    if scheduling_response:
-                        print(f"Scheduling agent response: {scheduling_response}")
-                        ai_response = scheduling_response
-                
-                # If no scheduling or scheduling failed, send default thank you message
-                if not scheduling_response:
-                    thank_you_message = "Thanks - this sounds like a great option for me, let me get back to you"
-                    ai_response = thank_you_message
-                
-                try:
-                    await send_sms(sender_phone, ai_response)
+                if scheduling_result and isinstance(scheduling_result, dict):
+                    scheduling_message = scheduling_result.get("message", "")
+                    visit_scheduled = scheduling_result.get("visit_scheduled", False)
                     
-                    Message.create({
-                        "threadId": thread["_id"],
-                        "from": MTA_PHONE_NUMBER,
-                        "to": sender_phone,
-                        "body": ai_response,
-                        "direction": "outbound",
-                        "timestamp": datetime.now()
-                    })
-                    print("✅ Response sent to dealer")
-                except Exception as send_error:
-                    print(f"Error sending message: {send_error}")
-                
-                # Mark thread as complete
-                Thread.update_one(
-                    {"_id": thread["_id"]},
-                    {
-                        "conversationComplete": True,
-                        "lastMessage": ai_response,
-                        "lastMessageTime": datetime.now()
-                    }
-                )
-                
-                # Extract and save car listing data
-                try:
-                    extracted_data = await extract_car_listing_data(transcript)
-                    print(f"Extracted car listing data: {extracted_data}")
-                    
-                    car_listing = CarListing.find_one({"threadId": thread["_id"]})
-                    if car_listing:
-                        CarListing.update_one(
-                            {"threadId": thread["_id"]},
-                            {**extracted_data, "conversationComplete": True}
+                    if visit_scheduled:
+                        print(f"✅ Visit scheduled! Scheduling agent response: {scheduling_message}")
+                        ai_response = scheduling_message
+                        
+                        # Send the scheduling confirmation message
+                        try:
+                            await send_sms(sender_phone, ai_response)
+                            
+                            Message.create({
+                                "threadId": thread["_id"],
+                                "from": MTA_PHONE_NUMBER,
+                                "to": sender_phone,
+                                "body": ai_response,
+                                "direction": "outbound",
+                                "timestamp": datetime.now()
+                            })
+                            print("✅ Scheduling confirmation sent to dealer")
+                        except Exception as send_error:
+                            print(f"Error sending scheduling message: {send_error}")
+                        
+                        # Mark thread as complete
+                        Thread.update_one(
+                            {"_id": thread["_id"]},
+                            {
+                                "conversationComplete": True,
+                                "lastMessage": ai_response,
+                                "lastMessageTime": datetime.now()
+                            }
                         )
-                        print("✅ Updated existing car listing")
+                        
+                        # Extract and save car listing data
+                        try:
+                            extracted_data = await extract_car_listing_data(transcript)
+                            print(f"Extracted car listing data: {extracted_data}")
+                            
+                            car_listing = CarListing.find_one({"threadId": thread["_id"]})
+                            if car_listing:
+                                CarListing.update_one(
+                                    {"threadId": thread["_id"]},
+                                    {**extracted_data, "conversationComplete": True}
+                                )
+                                print("✅ Updated existing car listing")
+                            else:
+                                CarListing.create({
+                                    "threadId": thread["_id"],
+                                    "phoneNumber": sender_phone,
+                                    **extracted_data,
+                                    "conversationComplete": True,
+                                    "extractedAt": datetime.now()
+                                })
+                                print("✅ Saved car listing data to MongoDB")
+                        except Exception as extract_error:
+                            print(f"Error extracting/saving car listing data: {extract_error}")
+                        
+                        return {"success": True, "message": "Visit scheduled, conversation complete"}
                     else:
-                        CarListing.create({
-                            "threadId": thread["_id"],
-                            "phoneNumber": sender_phone,
-                            **extracted_data,
-                            "conversationComplete": True,
-                            "extractedAt": datetime.now()
-                        })
-                        print("✅ Saved car listing data to MongoDB")
-                except Exception as extract_error:
-                    print(f"Error extracting/saving car listing data: {extract_error}")
-                
-                return {"success": True, "message": "Conversation complete"}
+                        # Scheduling agent returned a message but visit not scheduled yet
+                        print(f"📅 Scheduling agent response (visit not yet scheduled): {scheduling_message}")
+                        ai_response = scheduling_message
+                        # Continue with normal delayed response flow below - agent will keep returning #SCHEDULE# until visit is scheduled
+                elif scheduling_result:
+                    # Scheduling agent returned a string (backward compatibility)
+                    print(f"📅 Scheduling agent response (legacy format): {scheduling_result}")
+                    ai_response = scheduling_result
+                    # Continue with normal delayed response flow below
+                else:
+                    # Scheduling agent failed
+                    print("⚠️  Scheduling agent failed")
+                    ai_response = "I'm ready to schedule a visit. What date and time works for you?"
+                    # Continue with normal delayed response flow below
             else:
                 # Schedule delayed response
-                delay_ms = 0 # random.randint(30000, 60000)  
+                delay_ms = 8000 # random.randint(30000, 60000)  
                 print(f"⏱️  Scheduling response to be sent in {delay_ms // 1000} seconds")
                 
                 async def send_delayed_response():
