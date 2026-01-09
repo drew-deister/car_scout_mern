@@ -275,29 +275,15 @@ async def sms_webhook(webhook: SMSWebhook):
             del pending_responses[thread_id_string]
             print("⚠️  Cancelled pending response due to new message")
         
-        # Check if message is about visit scheduling
-        is_visit_scheduling = check_if_message_about_visit_scheduling(message_body)
-        
         # Generate AI agent response
         try:
             transcript = await build_conversation_transcript(thread_id_string, Message)
             print(f"Conversation transcript: {transcript}")
             
-            # If message is about visit scheduling, process it first
-            scheduling_response = None
-            if is_visit_scheduling:
-                print("📅 Message is about visit scheduling, processing with scheduling agent...")
-                scheduling_response = await process_visit_scheduling(transcript, thread_id_string, sender_phone, message_body)
-                if scheduling_response:
-                    print(f"Scheduling agent response: {scheduling_response}")
-            
-            # Only call main AI agent if scheduling agent didn't handle the message
-            if scheduling_response:
-                ai_response = scheduling_response
-            else:
-                known_data = None  # No URL extraction data available
-                ai_response = await get_ai_response(transcript, known_data, thread.get("waitingForDealerResponse", False))
-                print(f"AI agent response: {ai_response}")
+            # Always call main AI agent first
+            known_data = None  # No URL extraction data available
+            ai_response = await get_ai_response(transcript, known_data, thread.get("waitingForDealerResponse", False))
+            print(f"AI agent response: {ai_response}")
             
             # Check if we should enter waiting state
             if "# WAITING #" in ai_response:
@@ -336,28 +322,44 @@ async def sms_webhook(webhook: SMSWebhook):
             if ai_response == "# CONVO COMPLETE #":
                 print("✅ Conversation marked as complete by AI agent")
                 
-                thank_you_message = "Thanks - this sounds like a great option for me, let me get back to you"
+                # Check if the latest message is about scheduling a visit
+                is_visit_scheduling = check_if_message_about_visit_scheduling(message_body)
+                
+                # If dealer wants to schedule, use scheduling agent
+                scheduling_response = None
+                if is_visit_scheduling:
+                    print("📅 Dealer wants to schedule a visit, processing with scheduling agent...")
+                    scheduling_response = await process_visit_scheduling(transcript, thread_id_string, sender_phone, message_body)
+                    if scheduling_response:
+                        print(f"Scheduling agent response: {scheduling_response}")
+                        ai_response = scheduling_response
+                
+                # If no scheduling or scheduling failed, send default thank you message
+                if not scheduling_response:
+                    thank_you_message = "Thanks - this sounds like a great option for me, let me get back to you"
+                    ai_response = thank_you_message
+                
                 try:
-                    await send_sms(sender_phone, thank_you_message)
+                    await send_sms(sender_phone, ai_response)
                     
                     Message.create({
                         "threadId": thread["_id"],
                         "from": MTA_PHONE_NUMBER,
                         "to": sender_phone,
-                        "body": thank_you_message,
+                        "body": ai_response,
                         "direction": "outbound",
                         "timestamp": datetime.now()
                     })
-                    print("✅ Thank you message sent to dealer")
+                    print("✅ Response sent to dealer")
                 except Exception as send_error:
-                    print(f"Error sending thank you message: {send_error}")
+                    print(f"Error sending message: {send_error}")
                 
                 # Mark thread as complete
                 Thread.update_one(
                     {"_id": thread["_id"]},
                     {
                         "conversationComplete": True,
-                        "lastMessage": thank_you_message,
+                        "lastMessage": ai_response,
                         "lastMessageTime": datetime.now()
                     }
                 )
@@ -385,6 +387,8 @@ async def sms_webhook(webhook: SMSWebhook):
                         print("✅ Saved car listing data to MongoDB")
                 except Exception as extract_error:
                     print(f"Error extracting/saving car listing data: {extract_error}")
+                
+                return {"success": True, "message": "Conversation complete"}
             else:
                 # Schedule delayed response
                 delay_ms = 0 # random.randint(30000, 60000)  

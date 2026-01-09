@@ -657,6 +657,7 @@ Guidelines:
 5. DO NOT ask for information you already have. If you already know the make, model, year, miles, or listing price, skip asking for those and move on to information you don't have.
 6. CRITICAL: If the dealer says that they will work on getting information for you, will get back to you, will update you, or similar phrases indicating they need time to gather information, you should acknowledge this. However, if the dealer ALSO asks a question in the same message, you must answer their question first, then acknowledge that you'll wait. For example, if they say "I'll discuss with my GM. Do you have a trade?", respond with something like "No trade, and I'll be financing. Thanks!" and then return '# WAITING #'. If they only say they'll get back without asking a question, respond with ONLY a simple "Thank you" or "Thanks" and then return '# WAITING #'. This tells the system to stop responding until the dealer provides actual new information.
 7. If the dealer indicates that they have sent a link to the carfax (whether in the thread or in a separate message), do not continue asking for the carfax, and just make the values for 7 and 8 'check_carfax'.
+8. CRITICAL: If the dealer asks you to come in and see the car, or suggests scheduling a visit, BEFORE you have all the information you need (items 1-12), you must deflect politely. Say something like "I'd like to ask a few more questions first" or "Let me get a bit more info before we schedule a visit" and then continue asking for the missing information. Only agree to schedule a visit AFTER you have all the information and are ready to return '# CONVO COMPLETE #'.
 
 Return nothing but the message you would like to send the dealer (e.g., do not pre-pend "You: " or something similar to message). If the dealer says they'll get back to you, return '# WAITING #' after saying thank you. If you believe you have captured all of the information above, simply return '# CONVO COMPLETE #'. Do not return '# CONVO COMPLETE #' unless you are absolutely certain you have all of the information required."""
     
@@ -992,7 +993,7 @@ What should you do? If you need to use a tool, use the TOOL_CALL format. Otherwi
 
 
 async def process_visit_scheduling(conversation_transcript: str, thread_id: str, dealer_phone_number: str, latest_message: str) -> Optional[str]:
-    """Process visit scheduling - extract date/time and create/modify visits"""
+    """Process visit scheduling - check availability and schedule visits"""
     if not openai_client:
         return None
     
@@ -1008,9 +1009,28 @@ async def process_visit_scheduling(conversation_transcript: str, thread_id: str,
     today_str = now_ct.strftime('%Y-%m-%d')
     today_day_name = now_ct.strftime('%A')
     
+    # Get availability for next 2 days
+    end_date = now_ct + timedelta(days=2)
+    existing_visits = get_visit_availability(now_ct, end_date)
+    
+    # Convert existing visits to a more readable format for GPT
+    availability_info = []
+    for visit in existing_visits:
+        visit_time = datetime.fromisoformat(visit['scheduledTime']) if isinstance(visit['scheduledTime'], str) else visit['scheduledTime']
+        if visit_time.tzinfo is None:
+            visit_time = visit_time.replace(tzinfo=ct_tz)
+        else:
+            visit_time = visit_time.astimezone(ct_tz)
+        availability_info.append({
+            "time": visit_time.strftime('%A, %B %d at %I:%M %p CT'),
+            "datetime": visit_time.isoformat()
+        })
+    
+    availability_text = json.dumps(availability_info, indent=2) if availability_info else "No visits scheduled in the next 2 days"
+    
     try:
-        # Use GPT to extract visit scheduling information
-        extraction_prompt = f"""Analyze this conversation and the latest dealer message to determine if a visit should be scheduled, modified, or cancelled.
+        # Use GPT to extract visit scheduling information and determine response
+        extraction_prompt = f"""You are a scheduling assistant. Analyze the conversation to determine if the dealer has proposed a specific date and time for a visit.
 
 IMPORTANT: Today is {today_day_name}, {today_str} (Central Time). When the dealer mentions a day name like "Saturday" or "Monday", interpret it relative to today's date.
 
@@ -1019,21 +1039,21 @@ Latest dealer message: "{latest_message}"
 Full conversation:
 {conversation_transcript}
 
-If the dealer is asking to schedule a visit or has suggested a specific date and time, extract:
-- action: "create", "modify", "cancel", or "none"
-- date: The date (format: YYYY-MM-DD). For relative dates like "Saturday", calculate the actual date based on today ({today_str}).
-- time: The time (format: HH:MM in 24-hour format, Central Time)
-- visit_id: If modifying/cancelling, the visit ID (if mentioned)
+Your existing scheduled visits in the next 2 days:
+{availability_text}
 
-If action is "create" or "modify", you MUST have both date and time. If you don't have both, set action to "none".
+If the dealer has proposed a specific date and time, extract:
+- dealer_proposed_date: The date (format: YYYY-MM-DD). For relative dates like "Sunday" or "tomorrow", calculate the actual date based on today ({today_str}).
+- dealer_proposed_time: The time (format: HH:MM in 24-hour format, Central Time)
+- dealer_proposed_datetime: Combined datetime in ISO format (YYYY-MM-DDTHH:MM:SS)
+
+If the dealer has NOT proposed a specific time (just asked to schedule or come in), set dealer_proposed_date and dealer_proposed_time to null.
 
 Return ONLY valid JSON:
 {{
-  "action": "create|modify|cancel|none",
-  "date": "YYYY-MM-DD or null",
-  "time": "HH:MM or null",
-  "visit_id": "visit_id or null",
-  "notes": "any additional notes or null"
+  "dealer_proposed_date": "YYYY-MM-DD or null",
+  "dealer_proposed_time": "HH:MM or null",
+  "dealer_proposed_datetime": "YYYY-MM-DDTHH:MM:SS or null"
 }}"""
         
         completion = openai_client.chat.completions.create(
@@ -1049,118 +1069,188 @@ Return ONLY valid JSON:
         response_text = completion.choices[0].message.content.strip()
         data = json.loads(response_text)
         
-        action = data.get('action', 'none')
+        dealer_date = data.get('dealer_proposed_date')
+        dealer_time = data.get('dealer_proposed_time')
+        dealer_datetime_str = data.get('dealer_proposed_datetime')
         
-        if action == 'none':
-            # Ask for more information
-            return "What date and time would work best for you?"
+        # Get car listing if available
+        car_listing = CarListing.find_one({"threadId": ObjectId(thread_id)})
+        car_listing_id = str(car_listing["_id"]) if car_listing else None
         
-        if action == 'cancel':
-            visit_id = data.get('visit_id')
-            if visit_id:
-                # Find visit by ID or by thread
-                visit = None
-                if visit_id:
-                    visit = Visit.find_by_id(visit_id)
-                if not visit:
-                    # Find most recent visit for this thread
-                    visits = Visit.find({"threadId": ObjectId(thread_id)}, sort=[("scheduledTime", -1)])
-                    if visits:
-                        visit = visits[0]
-                
-                if visit:
-                    modify_visit(str(visit["_id"]), status="cancelled")
-                    return "I've cancelled the visit. Let me know if you'd like to reschedule."
-                else:
-                    return "I couldn't find a visit to cancel. Could you clarify which visit you'd like to cancel?"
-            else:
-                # Find most recent visit
-                visits = Visit.find({"threadId": ObjectId(thread_id)}, sort=[("scheduledTime", -1)])
-                if visits:
-                    modify_visit(str(visits[0]["_id"]), status="cancelled")
-                    return "I've cancelled the visit. Let me know if you'd like to reschedule."
-                else:
-                    return "I couldn't find a visit to cancel."
-        
-        if action == 'modify':
-            visit_id = data.get('visit_id')
-            date_str = data.get('date')
-            time_str = data.get('time')
-            
-            # Find visit
-            visit = None
-            if visit_id:
-                visit = Visit.find_by_id(visit_id)
-            if not visit:
-                visits = Visit.find({"threadId": ObjectId(thread_id)}, sort=[("scheduledTime", -1)])
-                if visits:
-                    visit = visits[0]
-            
-            if not visit:
-                return "I couldn't find a visit to modify. Would you like to schedule a new visit?"
-            
-            if date_str and time_str:
-                try:
-                    # Parse date and time, set to Central Time
-                    # Use today's date as default for relative date parsing
-                    datetime_str = f"{date_str} {time_str}"
-                    scheduled_time = date_parser.parse(datetime_str, default=now_ct)
-                    # Assume it's Central Time if no timezone specified
-                    if scheduled_time.tzinfo is None:
-                        scheduled_time = scheduled_time.replace(tzinfo=ct_tz)
-                    else:
-                        scheduled_time = scheduled_time.astimezone(ct_tz)
-                    
-                    # Validate that the scheduled time is not in the past
-                    if scheduled_time < now_ct:
-                        print(f"⚠️  Parsed date {scheduled_time} is in the past (today is {now_ct}). Rejecting.")
-                        return f"I had trouble understanding the date. The date you mentioned seems to be in the past. Could you provide a future date and time?"
-                    
-                    modify_visit(str(visit["_id"]), scheduled_time=scheduled_time, notes=data.get('notes'))
-                    return f"I've updated the visit to {scheduled_time.strftime('%A, %B %d at %I:%M %p')} Central Time. See you then!"
-                except Exception as e:
-                    print(f"Error parsing date/time: {e}")
-                    return "I had trouble understanding the date and time. Could you provide it in a clearer format?"
-            else:
-                return "I need both a date and time to reschedule. What date and time would work better?"
-        
-        if action == 'create':
-            date_str = data.get('date')
-            time_str = data.get('time')
-            
-            if not date_str or not time_str:
-                return "What date and time would work best for you?"
-            
+        # If dealer proposed a specific time, check availability
+        if dealer_date and dealer_time:
             try:
-                # Parse date and time, set to Central Time
-                # Use today's date as default for relative date parsing
-                datetime_str = f"{date_str} {time_str}"
-                scheduled_time = date_parser.parse(datetime_str, default=now_ct)
-                # Assume it's Central Time if no timezone specified
-                if scheduled_time.tzinfo is None:
-                    scheduled_time = scheduled_time.replace(tzinfo=ct_tz)
+                # Parse the proposed datetime
+                if dealer_datetime_str:
+                    proposed_time = datetime.fromisoformat(dealer_datetime_str.replace('Z', '+00:00'))
                 else:
-                    scheduled_time = scheduled_time.astimezone(ct_tz)
+                    datetime_str = f"{dealer_date} {dealer_time}"
+                    proposed_time = date_parser.parse(datetime_str, default=now_ct)
                 
-                # Validate that the scheduled time is not in the past
-                if scheduled_time < now_ct:
-                    print(f"⚠️  Parsed date {scheduled_time} is in the past (today is {now_ct}). Rejecting.")
-                    return f"I had trouble understanding the date. The date you mentioned seems to be in the past. Could you provide a future date and time? For example: 'This Saturday at 4pm' or 'January 10th at 4pm'"
+                # Ensure timezone
+                if proposed_time.tzinfo is None:
+                    proposed_time = proposed_time.replace(tzinfo=ct_tz)
+                else:
+                    proposed_time = proposed_time.astimezone(ct_tz)
                 
-                # Get car listing if available
-                car_listing = CarListing.find_one({"threadId": ObjectId(thread_id)})
-                car_listing_id = str(car_listing["_id"]) if car_listing else None
+                # Validate it's not in the past
+                if proposed_time < now_ct:
+                    # Propose a time instead
+                    return await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
                 
-                visit_id = create_visit(thread_id, scheduled_time, dealer_phone_number, car_listing_id, data.get('notes'))
+                # Check if the proposed time conflicts with existing visits
+                # Allow visits within 1 hour of each other (buffer time)
+                conflict = False
+                for visit in existing_visits:
+                    visit_time = datetime.fromisoformat(visit['scheduledTime']) if isinstance(visit['scheduledTime'], str) else visit['scheduledTime']
+                    if visit_time.tzinfo is None:
+                        visit_time = visit_time.replace(tzinfo=ct_tz)
+                    else:
+                        visit_time = visit_time.astimezone(ct_tz)
+                    
+                    time_diff = abs((proposed_time - visit_time).total_seconds())
+                    if time_diff < 3600:  # Less than 1 hour apart
+                        conflict = True
+                        break
                 
-                return f"Perfect! I've scheduled a visit for {scheduled_time.strftime('%A, %B %d at %I:%M %p')} Central Time. Looking forward to seeing you then!"
+                if conflict:
+                    # Propose an alternative time
+                    alternative_time = await find_next_available_time(proposed_time, existing_visits, ct_tz, end_date)
+                    if alternative_time:
+                        visit_id = create_visit(thread_id, alternative_time, dealer_phone_number, car_listing_id)
+                        return f"I'm not available at that exact time, but how about {alternative_time.strftime('%A, %B %d at %I:%M %p')} Central Time? I've scheduled it for then."
+                    else:
+                        return await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
+                else:
+                    # Time is available, create the visit
+                    visit_id = create_visit(thread_id, proposed_time, dealer_phone_number, car_listing_id)
+                    return f"Perfect! I've scheduled a visit for {proposed_time.strftime('%A, %B %d at %I:%M %p')} Central Time. Looking forward to seeing you then!"
             except Exception as e:
-                print(f"Error creating visit: {e}")
-                # Use a relative date example based on today
-                example_date = (now_ct + timedelta(days=7)).strftime('%B %d')
-                return f"I had trouble understanding the date and time. Could you provide it in a clearer format? For example: 'Monday at 2pm' or '{example_date} at 3:30pm'"
+                print(f"Error processing proposed time: {e}")
+                # Fall through to propose a time
+                return await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
+        else:
+            # Dealer didn't propose a specific time, propose one
+            return await propose_available_time(now_ct, end_date, existing_visits, ct_tz, thread_id, dealer_phone_number, car_listing_id)
         
-        return None
+async def find_next_available_time(proposed_time: datetime, existing_visits: List[Dict[str, Any]], ct_tz, end_date: datetime) -> Optional[datetime]:
+    """Find the next available time slot near the proposed time"""
+    # Try times around the proposed time (before and after)
+    time_slots = []
+    
+    # Try 30 minutes before and after
+    for offset_minutes in [-30, 30, -60, 60, -90, 90]:
+        candidate_time = proposed_time + timedelta(minutes=offset_minutes)
+        if candidate_time < datetime.now(ct_tz) or candidate_time > end_date:
+            continue
+        
+        # Check if this time conflicts
+        conflict = False
+        for visit in existing_visits:
+            visit_time = datetime.fromisoformat(visit['scheduledTime']) if isinstance(visit['scheduledTime'], str) else visit['scheduledTime']
+            if visit_time.tzinfo is None:
+                visit_time = visit_time.replace(tzinfo=ct_tz)
+            else:
+                visit_time = visit_time.astimezone(ct_tz)
+            
+            time_diff = abs((candidate_time - visit_time).total_seconds())
+            if time_diff < 3600:  # Less than 1 hour apart
+                conflict = True
+                break
+        
+        if not conflict:
+            time_slots.append(candidate_time)
+    
+    if time_slots:
+        # Return the closest one to the proposed time
+        time_slots.sort(key=lambda t: abs((t - proposed_time).total_seconds()))
+        return time_slots[0]
+    
+    return None
+
+
+async def propose_available_time(now_ct: datetime, end_date: datetime, existing_visits: List[Dict[str, Any]], ct_tz, thread_id: str, dealer_phone_number: str, car_listing_id: Optional[str]) -> str:
+    """Propose an available time within the next 2 days"""
+    # Preferred times: 10am, 2pm, 4pm
+    preferred_hours = [10, 14, 16]
+    
+    # Start from tomorrow (or today if it's early enough)
+    start_date = now_ct + timedelta(days=1)
+    if now_ct.hour < 10:
+        start_date = now_ct.replace(hour=10, minute=0, second=0, microsecond=0)
+    
+    # Try to find an available slot
+    current_date = start_date.date()
+    end_date_only = end_date.date()
+    
+    while current_date <= end_date_only:
+        for hour in preferred_hours:
+            candidate_time = datetime.combine(current_date, datetime.min.time().replace(hour=hour, minute=0))
+            if candidate_time.tzinfo is None:
+                candidate_time = candidate_time.replace(tzinfo=ct_tz)
+            else:
+                candidate_time = candidate_time.astimezone(ct_tz)
+            
+            if candidate_time < now_ct or candidate_time > end_date:
+                continue
+            
+            # Check if this time conflicts
+            conflict = False
+            for visit in existing_visits:
+                visit_time = datetime.fromisoformat(visit['scheduledTime']) if isinstance(visit['scheduledTime'], str) else visit['scheduledTime']
+                if visit_time.tzinfo is None:
+                    visit_time = visit_time.replace(tzinfo=ct_tz)
+                else:
+                    visit_time = visit_time.astimezone(ct_tz)
+                
+                time_diff = abs((candidate_time - visit_time).total_seconds())
+                if time_diff < 3600:  # Less than 1 hour apart
+                    conflict = True
+                    break
+            
+            if not conflict:
+                # Found an available time, create the visit
+                visit_id = create_visit(thread_id, candidate_time, dealer_phone_number, car_listing_id)
+                return f"How about {candidate_time.strftime('%A, %B %d at %I:%M %p')} Central Time? I've scheduled it for then."
+        
+        # Move to next day
+        current_date += timedelta(days=1)
+    
+    # If no preferred time found, try any available time
+    current_date = start_date.date()
+    while current_date <= end_date_only:
+        for hour in range(9, 18):  # 9am to 5pm
+            candidate_time = datetime.combine(current_date, datetime.min.time().replace(hour=hour, minute=0))
+            if candidate_time.tzinfo is None:
+                candidate_time = candidate_time.replace(tzinfo=ct_tz)
+            else:
+                candidate_time = candidate_time.astimezone(ct_tz)
+            
+            if candidate_time < now_ct or candidate_time > end_date:
+                continue
+            
+            # Check if this time conflicts
+            conflict = False
+            for visit in existing_visits:
+                visit_time = datetime.fromisoformat(visit['scheduledTime']) if isinstance(visit['scheduledTime'], str) else visit['scheduledTime']
+                if visit_time.tzinfo is None:
+                    visit_time = visit_time.replace(tzinfo=ct_tz)
+                else:
+                    visit_time = visit_time.astimezone(ct_tz)
+                
+                time_diff = abs((candidate_time - visit_time).total_seconds())
+                if time_diff < 3600:
+                    conflict = True
+                    break
+            
+            if not conflict:
+                visit_id = create_visit(thread_id, candidate_time, dealer_phone_number, car_listing_id)
+                return f"How about {candidate_time.strftime('%A, %B %d at %I:%M %p')} Central Time? I've scheduled it for then."
+        
+        current_date += timedelta(days=1)
+    
+    # If still no time found, suggest they propose a time
+    return "I'm pretty booked up over the next couple days. What times work best for you?"
     except Exception as error:
         print(f'Error processing visit scheduling: {error}')
         return None
