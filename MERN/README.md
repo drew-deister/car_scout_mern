@@ -51,7 +51,12 @@ npm run server
 
 3. Start the frontend (in a new terminal):
 ```bash
-npm run client
+npm run dev
+```
+
+4. Start ngrok
+```bash
+ngrok http 5001
 ```
 
 The application will be available at:
@@ -98,19 +103,6 @@ Your task is to get the following pieces of information from the dealer:
 7. Lowest price dealer will accept
 8. Doc fee amount
 
-Here is the transcript of the conversation so far:
-<>
-
-Please output what you think your next message to the dealer should be. Guidelines:
-1. Maintain a professional, but not overly friendly tone. Do not sound like a robot.
-2. Try to obtain the pieces of information above in order (e.g., don't ask for the age of the tires before you know the car's make)
-3. Where it makes sense, I would ask for the car make, model, year and number of miles in one message
-4. Once you have the listing price, do some negotiation before finalizing 7 (lowest price dealer will accept) and 8 (doc fee). Specifically, propose lower purchase prices or doc fees. If the tires are five or more years old, mention that as a reason why you are trying to negotiate. Do not attempt an unreasonable amount of negotiation.
-5. Do not sound too robotic - you are impersonating a human who is a savvy used car buyer. Do not use perfect punctuation.
-
-Return nothing but the message you would like to send the dealer. If you believe you have captured all of the information above, simply return '# CONVO COMPLETE #'.
-
-lsof -ti :5001 | xargs kill -9 2>/dev/null; sleep 1; lsof -ti :5001 || echo "Port 5001 is now free"
 
 to add:
 - come in person to negotiate, defer to sales team
@@ -118,3 +110,18 @@ to add:
 - multiple cars mentioned
 - accessing links
 - dont keep negotiating after theyve already gone down (913 733 1294)
+
+
+conversation states (spirit -- it shouldnt always respond):
+- default: continue conversation as usual 
+- waiting - has not yet provided all necessary information: either do not respond with anything, or say Thanks, I'll wait until I've received more info
+- complete - received all necessary information: do not respond to further messages
+
+state change instruction:
+- default -> waiting - has not yet provided all necessary information: shift after the first repeat attempt at getting a piece of information (e.g., if you asked for whether the title is clean or rebuilt, and they don't sufficiently answer, ask once more, and if they still don't respond, shift to the waiting state) 
+- default -> complete - received all necessary information: shift when all information has been received
+- waiting - has not yet provided all necessary information -> default: if the dealer provides the information last asked for, then shift back to default mode
+- waiting - has not yet provided all necessary information -> complete: if the dealer provides the information last asked for, and that piece of information was the last piece needed
+- complete - received all necessary information -> default: not allowed, once complete the conversation is complete
+- complete - received all necessary information -> waiting - has not yet provided all necessary information: not allowed, once complete the conversation is complete
+

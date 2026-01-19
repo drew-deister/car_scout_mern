@@ -885,7 +885,7 @@ app.post('/api/webhook/sms', async (req, res) => {
         
         // Conversation is complete, no more responses will be sent
       } else {
-        const delayMs = Math.floor(Math.random() * 30000) + 300000; 
+        const delayMs = Math.floor(Math.random() * 0) + 0; 
         console.log(`⏱️  Scheduling response to be sent in ${Math.round(delayMs / 1000)} seconds`);
 
         const timeoutId = setTimeout(async () => {

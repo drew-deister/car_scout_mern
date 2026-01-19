@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script to start the server and ngrok together
-# Make sure your server is running on port 5000 (or update the port below)
+# Make sure your server is running on port 5001 (or update the port below)
 
 echo "🚀 Starting ngrok tunnel..."
 echo ""
@@ -16,6 +16,6 @@ echo ""
 echo "Press Ctrl+C to stop ngrok"
 echo ""
 
-# Start ngrok on port 5000 (change if your server uses a different port)
-ngrok http 5000
+# Start ngrok on port 5001 (change if your server uses a different port)
+ngrok http 5001
 
