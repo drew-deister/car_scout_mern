@@ -9,18 +9,6 @@ const Sidebar = () => {
     <aside className="sidebar">
       <nav className="sidebar-nav">
         <Link 
-          to="/" 
-          className={`nav-link ${location.pathname === '/' ? 'active' : ''}`}
-        >
-          Home
-        </Link>
-        <Link 
-          to="/scout" 
-          className={`nav-link ${location.pathname === '/scout' ? 'active' : ''}`}
-        >
-          Scout
-        </Link>
-        <Link 
           to="/listings" 
           className={`nav-link ${location.pathname === '/listings' ? 'active' : ''}`}
         >

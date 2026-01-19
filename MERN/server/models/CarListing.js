@@ -68,6 +68,10 @@ const carListingSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  reviewed: {
+    type: Boolean,
+    default: false
+  },
   extractedAt: {
     type: Date,
     default: Date.now

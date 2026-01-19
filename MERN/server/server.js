@@ -974,7 +974,18 @@ app.get('/api/car-listings', async (req, res) => {
       });
     }
 
-    const listings = await CarListing.find()
+    // Support filtering by reviewed status
+    const { reviewed } = req.query;
+    let query = {};
+    
+    if (reviewed === 'true') {
+      query.reviewed = true;
+    } else if (reviewed === 'false') {
+      query.reviewed = false;
+    }
+    // If reviewed is not provided or is 'all', don't filter by reviewed status
+
+    const listings = await CarListing.find(query)
       .populate('threadId')
       .sort({ extractedAt: -1 })
       .exec();
@@ -1015,6 +1026,33 @@ app.get('/api/threads/:threadId/car-listing', async (req, res) => {
   } catch (error) {
     console.error('Error fetching car listing:', error);
     res.status(500).json({ error: 'Failed to fetch car listing' });
+  }
+});
+
+// Update reviewed status for a car listing
+app.patch('/api/car-listings/:listingId/reviewed', async (req, res) => {
+  try {
+    const { listingId } = req.params;
+    const { reviewed } = req.body;
+
+    if (typeof reviewed !== 'boolean') {
+      return res.status(400).json({ error: 'reviewed must be a boolean value' });
+    }
+
+    const carListing = await CarListing.findByIdAndUpdate(
+      listingId,
+      { reviewed },
+      { new: true }
+    );
+
+    if (!carListing) {
+      return res.status(404).json({ error: 'Car listing not found' });
+    }
+
+    res.json(carListing);
+  } catch (error) {
+    console.error('Error updating reviewed status:', error);
+    res.status(500).json({ error: 'Failed to update reviewed status' });
   }
 });
 

@@ -112,7 +112,7 @@ to add:
 - dont keep negotiating after theyve already gone down (913 733 1294)
 
 
-conversation states (spirit -- it shouldnt always respond):
+conversation states:
 - default: continue conversation as usual 
 - waiting - has not yet provided all necessary information: either do not respond with anything, or say Thanks, I'll wait until I've received more info
 - complete - received all necessary information: do not respond to further messages

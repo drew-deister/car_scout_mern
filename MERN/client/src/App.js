@@ -1,8 +1,6 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
-import Home from './components/Home';
-import Scout from './components/Scout';
 import CarListings from './components/CarListings';
 import './App.css';
 
@@ -13,8 +11,7 @@ function App() {
         <Sidebar />
         <main className="main-content">
           <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/scout" element={<Scout />} />
+            <Route path="/" element={<Navigate to="/listings" replace />} />
             <Route path="/listings" element={<CarListings />} />
           </Routes>
         </main>
