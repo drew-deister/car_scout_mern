@@ -9,8 +9,8 @@ const CarListings = () => {
 
   // Ensure API_BASE_URL ends with /api
   const getApiBaseUrl = () => {
-    // Production backend URL (AWS Elastic Beanstalk)
-    const productionUrl = 'http://car-scout-backend-updated-env.eba-2xmcecpg.us-east-1.elasticbeanstalk.com/api';
+    // Production backend URL (AWS Elastic Beanstalk) - use HTTPS for mixed content
+    const productionUrl = 'https://car-scout-backend-updated-env.eba-2xmcecpg.us-east-1.elasticbeanstalk.com/api';
     const envUrl = process.env.REACT_APP_API_URL || (process.env.NODE_ENV === 'production' ? productionUrl : 'http://localhost:5001/api');
     // If it doesn't end with /api, add it
     return envUrl.endsWith('/api') ? envUrl : `${envUrl}/api`;
