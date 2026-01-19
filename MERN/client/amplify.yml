@@ -3,15 +3,17 @@ frontend:
   phases:
     preBuild:
       commands:
+        - cd MERN/client
         - npm ci
     build:
       commands:
+        - cd MERN/client
         - npm run build
   artifacts:
-    baseDirectory: build
+    baseDirectory: MERN/client/build
     files:
       - '**/*'
   cache:
     paths:
-      - node_modules/**/*
+      - MERN/client/node_modules/**/*
 
