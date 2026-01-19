@@ -7,7 +7,7 @@ const CarListings = () => {
   const [loading, setLoading] = useState(true);
   const [reviewedFilter, setReviewedFilter] = useState('not-reviewed'); // 'all', 'reviewed', 'not-reviewed'
 
-  const API_BASE_URL = 'http://localhost:5001/api';
+  const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001/api';
 
   useEffect(() => {
     const fetchListings = async () => {

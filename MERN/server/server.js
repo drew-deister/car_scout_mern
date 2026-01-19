@@ -470,7 +470,11 @@ async function sendSMS(to, message, retries = 3) {
 }
 
 // Middleware
-app.use(cors());
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || '*', // Allow all origins in development, specific URL in production
+  credentials: true
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
