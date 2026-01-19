@@ -5,9 +5,17 @@ import './CarListings.css';
 const CarListings = () => {
   const [listings, setListings] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [reviewedFilter, setReviewedFilter] = useState('not-reviewed'); // 'all', 'reviewed', 'not-reviewed'
+  const [reviewedFilter, setReviewedFilter] = useState('all'); // 'all', 'reviewed', 'not-reviewed'
 
-  const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001/api';
+  // Ensure API_BASE_URL ends with /api
+  const getApiBaseUrl = () => {
+    // Production backend URL (AWS Elastic Beanstalk)
+    const productionUrl = 'http://car-scout-backend-updated-env.eba-2xmcecpg.us-east-1.elasticbeanstalk.com/api';
+    const envUrl = process.env.REACT_APP_API_URL || (process.env.NODE_ENV === 'production' ? productionUrl : 'http://localhost:5001/api');
+    // If it doesn't end with /api, add it
+    return envUrl.endsWith('/api') ? envUrl : `${envUrl}/api`;
+  };
+  const API_BASE_URL = getApiBaseUrl();
 
   useEffect(() => {
     const fetchListings = async () => {
@@ -20,16 +28,34 @@ const CarListings = () => {
           url += '?reviewed=false';
         }
 
+        console.log('Fetching from URL:', url); // Debug log
+        console.log('API_BASE_URL:', API_BASE_URL); // Debug log
         const response = await fetch(url);
+        
+        if (!response.ok) {
+          console.error('API response not OK:', response.status, response.statusText);
+          const errorText = await response.text();
+          console.error('Error response:', errorText);
+          console.error('Attempted URL:', url);
+          setListings([]);
+          setLoading(false);
+          return;
+        }
+        
         const data = await response.json();
-        // Filter out listings without miles or listingPrice
-        const validListings = data.filter(
-          listing => listing.miles !== null && listing.listingPrice !== null
-        );
-        setListings(validListings);
+        console.log('Received listings:', data.length); // Debug log
+        console.log('Sample listing:', data[0]); // Debug log
+        // Keep all listings for the table, filtering for scatter plot happens separately
+        setListings(data);
         setLoading(false);
       } catch (error) {
         console.error('Error fetching car listings:', error);
+        console.error('API_BASE_URL was:', API_BASE_URL);
+        console.error('Full error details:', error.message);
+        if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+          console.error('Network error - check if backend is accessible and CORS is configured');
+        }
+        setListings([]);
         setLoading(false);
       }
     };
@@ -67,13 +93,15 @@ const CarListings = () => {
     }
   };
 
-  // Transform data for scatterplot
-  const scatterData = listings.map((listing, index) => ({
-    x: listing.miles,
-    y: listing.listingPrice,
-    listing: listing,
-    index: index
-  }));
+  // Transform data for scatterplot - only include listings with both miles and listingPrice
+  const scatterData = listings
+    .filter(listing => listing.miles !== null && listing.listingPrice !== null)
+    .map((listing, index) => ({
+      x: listing.miles,
+      y: listing.listingPrice,
+      listing: listing,
+      index: index
+    }));
 
   // Calculate rounded domains for axes
   const maxMiles = scatterData.length > 0 ? Math.max(...scatterData.map(d => d.x)) : 0;
