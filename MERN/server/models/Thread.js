@@ -18,30 +18,26 @@ const threadSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-  // Store extracted data from URLs
-  extractedUrlData: {
-    type: {
-      make: String,
-      model: String,
-      year: Number,
-      miles: Number,
-      listingPrice: Number,
-      tireLifeLeft: Boolean,
-      lowestPrice: Number,
-      docFeeQuoted: Number,
-      docFeeAgreed: Number,
-      docFeeNegotiable: Boolean,
-      titleStatus: String,
-      carfaxDamageIncidents: String,
-      url: String,
-      extractedAt: Date
-    },
+  // Conversation state management
+  conversationState: {
+    type: String,
+    enum: ['default', 'waiting', 'complete'],
+    default: 'default'
+  },
+  lastQuestionAsked: {
+    type: String,
     default: null
   },
+  questionRepeatCount: {
+    type: Number,
+    default: 0
+  },
+  // Legacy field - kept for backwards compatibility but not used
   conversationComplete: {
     type: Boolean,
     default: false
   },
+  // Legacy field - kept for backwards compatibility but not used
   waitingForDealerResponse: {
     type: Boolean,
     default: false
