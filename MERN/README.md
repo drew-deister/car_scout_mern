@@ -125,3 +125,8 @@ state change instruction:
 - complete - received all necessary information -> default: not allowed, once complete the conversation is complete
 - complete - received all necessary information -> waiting - has not yet provided all necessary information: not allowed, once complete the conversation is complete
 
+
+
+https://us-east-1.console.aws.amazon.com/elasticbeanstalk/home?region=us-east-1#/application/overview?applicationName=car-scout-backend-updated
+
+https://us-east-1.console.aws.amazon.com/amplify/apps/d332af70aoica8/branches/main/deployments
